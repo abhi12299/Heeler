@@ -132,6 +132,15 @@ Notification Service and Widgets extensions and both entitlements. The trade-off
 The committed project, entitlements, and Info.plist are untouched; the free
 project is generated and git-ignored.
 
+### Custom Agents
+
+herdr launches only the Agent kinds it supports, so a shell alias such as
+`cg() { CLAUDE_CONFIG_DIR=~/.claude-work claude --dangerously-skip-permissions "$@"; }`
+cannot be started by name. **New Agent > Custom Agents** saves the same thing
+as a profile — base Agent, arguments, `KEY=VALUE` environment (`~` and
+`$HOME` resolve to the Host's home) — and the Agent picker offers it wherever
+that Agent is installed.
+
 ### Tailscale SSH Hosts
 
 A machine with [Tailscale SSH](https://tailscale.com/kb/1193/tailscale-ssh)

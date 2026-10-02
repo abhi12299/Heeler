@@ -40,6 +40,10 @@ _Avoid_: QR code, invite
 A single-use, TTL-bound Ed25519 keypair carried inside a Pairing Code. Its authorized_keys line is restricted to a forced command that can only perform Enrollment; it is destroyed on success or expiry.
 _Avoid_: temp key, one-time password
 
+**Custom Agent**:
+A saved launch profile over a supported Agent kind: the kind, arguments placed before the New Agent form's, and environment variables set on the pane herdr creates. Stored on the device and offered by every Host where its kind is installed. It is the app's form of a shell alias; herdr itself only ever sees the kind and argv.
+_Avoid_: alias, preset, agent template
+
 **Tailscale SSH Host**:
 A Host reached through tailscaled's SSH server instead of OpenSSH. The phone's tailnet identity and the tailnet policy authorize it, so it has no credential and no Enrollment; a `check` policy may hold a connection until the user approves a Tailscale login link. Its Pairing Code carries `auth: tailscale` and no Bootstrap Key.
 _Avoid_: tailnet key, Tailscale login (that is the browser check)
