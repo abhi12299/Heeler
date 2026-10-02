@@ -1,36 +1,65 @@
 import Foundation
 import Observation
 
-/// A user-defined launch profile over a supported Agent kind — the app's
-/// equivalent of a shell alias such as `cg() { CLAUDE_CONFIG_DIR=… claude
-/// --dangerously-skip-permissions "$@"; }`. herdr's `agent.start` only takes a
-/// supported kind plus argv (it types `<kind> <args>` into the pane's shell),
-/// so a Custom Agent is exactly that pair plus environment variables, which
-/// travel on the `tab.create`/`workspace.create` that opens the pane and are
-/// inherited by the shell the kind runs in.
+/// A user-defined launch over a shell command — typically one of the user's
+/// own aliases or functions, such as `cg() { CLAUDE_CONFIG_DIR=… claude
+/// --dangerously-skip-permissions "$@"; }`. herdr's `agent.start` only types
+/// a supported kind's own executable, which bypasses aliases, so a Custom
+/// Agent instead types its command into the fresh pane's interactive shell,
+/// where the user's aliases and functions are defined, and herdr detects the
+/// Agent it starts as it would one typed at the keyboard. Environment
+/// variables travel on the `tab.create`/`workspace.create` that opens the
+/// pane and are inherited by that shell.
 struct CustomAgent: Identifiable, Codable, Hashable, Sendable {
     let id: UUID
-    /// What the picker shows, and the default agent name when it is a valid
-    /// herdr agent name (`cg`, `cg-2`, …).
+    /// What the picker shows, the command when `command` is empty, and the
+    /// default agent name when it is a valid herdr agent name (`cg`, `cg-2`).
     var name: String
-    /// The supported kind herdr launches. Stored raw so a kind this build no
-    /// longer knows keeps the profile instead of failing the whole list.
+    /// The Agent the command starts: a Host offers the profile only where
+    /// this kind is installed. Stored raw so a kind this build no longer
+    /// knows keeps the profile instead of failing the whole list.
     var kind: String
-    /// Arguments in the New Agent field's syntax (quotes, backslash escapes).
+    /// The shell command typed into the pane, e.g. `cg`. Empty runs the name.
+    var command: String
+    /// Arguments in the New Agent field's syntax (quotes, backslash escapes),
+    /// quoted again onto the command line.
     var arguments: String
     /// `KEY=VALUE` per line. A value starting with `~` is expanded to the
     /// Host's home directory at launch.
     var environment: String
 
     init(
-        id: UUID = UUID(), name: String, kind: SupportedAgentKind,
+        id: UUID = UUID(), name: String, kind: SupportedAgentKind, command: String = "",
         arguments: String = "", environment: String = ""
     ) {
         self.id = id
         self.name = name
         self.kind = kind.rawValue
+        self.command = command
         self.arguments = arguments
         self.environment = environment
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, kind, command, arguments, environment
+    }
+
+    /// Profiles saved before `command` existed decode with it empty, which
+    /// runs their name — the alias they were named after.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        kind = try container.decode(String.self, forKey: .kind)
+        command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
+        arguments = try container.decode(String.self, forKey: .arguments)
+        environment = try container.decode(String.self, forKey: .environment)
+    }
+
+    /// The command typed into the shell: `command`, or the name when empty.
+    var resolvedCommand: String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? trimmedName : trimmed
     }
 
     var supportedKind: SupportedAgentKind? { SupportedAgentKind(rawValue: kind) }
@@ -124,6 +153,12 @@ struct CustomAgent: Identifiable, Codable, Hashable, Sendable {
     var validationMessage: String? {
         if trimmedName.isEmpty { return "Give it a name." }
         if supportedKind == nil { return "\(kind) is not an Agent this app can launch." }
+        if resolvedCommand.contains(where: \.isNewline) { return "Keep the command on one line." }
+        if command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            trimmedName.wholeMatch(of: /[A-Za-z0-9_.+:@\/-]+/) == nil
+        {
+            return "Enter the command to run; the name is not one."
+        }
         if case .failure(let error) = parsedArguments { return error.message }
         if case .failure(let error) = parsedEnvironment { return error.message }
         return nil

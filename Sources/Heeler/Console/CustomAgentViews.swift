@@ -29,8 +29,8 @@ struct CustomAgentListView: View {
                 }
             } footer: {
                 Text(
-                    "Like a shell alias: an installed Agent with your own arguments and "
-                        + "environment variables. A Host offers each one where its Agent is installed.")
+                    "Runs one of your shell aliases or commands, like cg, in a new pane. A Host "
+                        + "offers each one where the Agent it starts is installed.")
             }
         }
         .overlay {
@@ -38,7 +38,7 @@ struct CustomAgentListView: View {
                 ContentUnavailableView(
                     "No Custom Agents",
                     systemImage: "terminal",
-                    description: Text("Add one to start an Agent with your own flags and environment."))
+                    description: Text("Add one to start an Agent through your own shell alias."))
             }
         }
         .navigationTitle("Custom Agents")
@@ -85,13 +85,24 @@ struct CustomAgentEditorView: View {
                 TextField("Name, e.g. cg", text: $draft.name)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                Picker("Agent", selection: $draft.kind) {
+                TextField(
+                    "Command (default: \(draft.trimmedName.isEmpty ? "the name" : draft.trimmedName))",
+                    text: $draft.command
+                )
+                .font(.callout.monospaced())
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .accessibilityLabel("Command")
+                Picker("Starts", selection: $draft.kind) {
                     ForEach(SupportedAgentKind.allCases) { kind in
                         Text("\(kind.displayName) (\(kind.executable))").tag(kind.rawValue)
                     }
                 }
             } footer: {
-                Text("A valid agent name (lowercase, digits, - or _) also names the agents it starts.")
+                Text(
+                    "Typed into the Host's shell, so your aliases and functions work: name it cg "
+                        + "and it runs your cg. A valid agent name (lowercase, digits, - or _) also "
+                        + "names the agents it starts.")
             }
 
             Section {
@@ -104,7 +115,7 @@ struct CustomAgentEditorView: View {
                 if case .failure(let error) = draft.parsedArguments {
                     Text(error.message).foregroundStyle(.red)
                 } else {
-                    Text("Placed before any arguments typed on the New Agent form.")
+                    Text("Added after the command, before any arguments typed on the New Agent form.")
                 }
             }
 
@@ -156,18 +167,19 @@ enum CustomAgentPreview {
     static func commandLine(for agent: CustomAgent) -> String {
         var parts: [String] = []
         if case .success(let entries) = agent.parsedEnvironment {
-            parts += entries.map { "\($0.key)=\(quoted($0.value))" }
+            parts += entries.map { "\($0.key)=\(environmentValue($0.value))" }
         }
-        parts.append(agent.supportedKind?.executable ?? agent.kind)
+        parts.append(agent.resolvedCommand)
         if case .success(let arguments) = agent.parsedArguments {
-            parts += arguments.map(quoted)
+            parts += arguments.map(ShellWord.quoted)
         }
         return parts.joined(separator: " ")
     }
 
-    private static func quoted(_ value: String) -> String {
-        guard value.isEmpty || value.contains(where: { $0.isWhitespace || "\"'\\$`".contains($0) })
-        else { return value }
-        return "'" + value.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+    /// A leading `~` stays bare: it becomes the Host's home before launch,
+    /// just as the shell would expand it.
+    private static func environmentValue(_ value: String) -> String {
+        guard value.hasPrefix("~/") else { return ShellWord.quoted(value) }
+        return "~" + ShellWord.quoted(String(value.dropFirst()))
     }
 }

@@ -1025,6 +1025,9 @@ actor HeelerSSHTransport: Transport {
         _ launch: AgentLaunchRequest,
         paneID: String
     ) async throws -> AgentStartedResponse {
+        if let line = launch.typedCommandLine {
+            return try await startAgentByTyping(line, name: launch.name, paneID: paneID)
+        }
         let params = AgentStartParams(
             kind: launch.kind,
             name: launch.name,
@@ -1048,6 +1051,70 @@ actor HeelerSSHTransport: Transport {
 
     private static let shellReadinessBudget: Duration = .seconds(10)
     private static let shellReadinessRetryDelay: Duration = .milliseconds(500)
+
+    /// A Custom Agent's launch: types its command line into the fresh pane's
+    /// interactive shell — the only place the user's aliases and functions
+    /// exist — then waits for herdr to detect the Agent it started and names
+    /// it. A shell still starting up buffers the typed line until its prompt
+    /// (verified live on 0.9.3: `cg` typed right after `tab.create` was
+    /// detected as claude within 1.3s). When nothing is detected in time the
+    /// pane's last lines (typically `command not found`) explain the failure.
+    private func startAgentByTyping(
+        _ line: String, name: String, paneID: String
+    ) async throws -> AgentStartedResponse {
+        _ = try await request(
+            method: "pane.send_input",
+            params: PaneSendInputParams(paneID: paneID, keys: ["enter"], text: line),
+            decoding: OkResponse.self)
+        let deadline = ContinuousClock.now + Self.typedLaunchDetectionBudget
+        while true {
+            do {
+                let detected = try await request(
+                    method: "agent.get",
+                    params: AgentTarget(target: paneID),
+                    decoding: AgentInfoResponse.self
+                ).agent
+                if detected.agent != nil {
+                    // Cosmetic: the Agent already runs under herdr's default
+                    // name, so a refused rename must not fail the launch.
+                    let named = try? await request(
+                        method: "agent.rename",
+                        params: AgentRenameParams(target: paneID, name: name),
+                        decoding: AgentInfoResponse.self
+                    ).agent
+                    return AgentStartedResponse(agent: named ?? detected, argv: [line])
+                }
+            } catch let error as HerdrAPIError where error.code == "agent_not_found" {
+                // Still the shell, or the command has not exec'd yet.
+            }
+            guard ContinuousClock.now + Self.typedLaunchPollInterval < deadline else {
+                throw HerdrAPIError(
+                    code: "custom_agent_not_detected",
+                    message: await typedLaunchFailureMessage(line, paneID: paneID))
+            }
+            try await Task.sleep(for: Self.typedLaunchPollInterval)
+        }
+    }
+
+    private func typedLaunchFailureMessage(_ line: String, paneID: String) async -> String {
+        let summary = "`\(line)` did not start an agent herdr recognizes."
+        guard
+            let read = try? await request(
+                method: "pane.read",
+                params: PaneReadParams(paneID: paneID, source: .recent, lines: 20),
+                decoding: PaneReadResponse.self)
+        else { return summary }
+        // A failed command hands the shell back to its prompt, so the line
+        // that explains it is the one above the last.
+        let lines = read.read.text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard let said = lines.dropLast().last ?? lines.last else { return summary }
+        return "\(summary) The shell said: \(said)"
+    }
+
+    private static let typedLaunchDetectionBudget: Duration = .seconds(15)
+    private static let typedLaunchPollInterval: Duration = .milliseconds(300)
 
     func closePane(_ params: PaneTarget) async throws {
         _ = try await request(

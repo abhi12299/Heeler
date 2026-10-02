@@ -1025,6 +1025,73 @@ struct HeelerSSHTransportBehaviorE2ETests {
         )
     }
 
+    /// A Custom Agent runs the user's own alias (`cg`), which only the
+    /// pane's interactive shell knows: the launch types it there instead of
+    /// `agent.start`, waits for herdr to detect the Agent, and names it.
+    @Test("a custom agent types its command into the fresh pane and names what it starts")
+    func customAgentTypesItsCommandAndNamesTheDetectedAgent() async throws {
+        let environment = try #require(HeelerSSHTransportBehaviorEnvironment.current)
+        let transport = try await HeelerSSHTransport.connect(
+            settings: environment.directSettings())
+        defer { Task { try? await transport.close() } }
+
+        let token = Self.scriptToken("ok")
+        let agent = try await transport.startAgent(
+            AgentLaunchRequest(
+                kind: "claude",
+                name: "cg",
+                arguments: ["--model", "opus 5"],
+                workspaceID: "workspace-1",
+                cwd: "/fixture/\(token)",
+                environment: ["CLAUDE_CONFIG_DIR": "/c"],
+                shellCommand: "cg"))
+
+        #expect(agent.paneID == "pane:\(token)")
+        let recorded = try await Self.recordedRequests(from: transport, token: token)
+        try #require(recorded.count == 5)
+        #expect(
+            recorded[0]
+                == #"tab.create {"cwd":"/fixture/\#(token)","env":{"CLAUDE_CONFIG_DIR":"/c"},"focus":false,"label":"cg","workspace_id":"workspace-1"}"#
+        )
+        #expect(
+            recorded[1]
+                == #"pane.send_input {"keys":["enter"],"pane_id":"pane:\#(token)","text":"cg --model 'opus 5'"}"#
+        )
+        // The first poll still finds the shell; the second finds the Agent.
+        #expect(recorded[2] == #"agent.get {"target":"pane:\#(token)"}"#)
+        #expect(recorded[3] == recorded[2])
+        #expect(recorded[4] == #"agent.rename {"name":"cg","target":"pane:\#(token)"}"#)
+        #expect(!recorded.contains { $0.hasPrefix("agent.start ") })
+    }
+
+    /// A mistyped or missing alias leaves a bare shell that never becomes an
+    /// Agent: the launch gives up, closes that pane like any refused start,
+    /// and passes on what the shell said.
+    @Test("a custom agent whose command starts no agent closes its pane and says why")
+    func customAgentThatStartsNothingClosesThePane() async throws {
+        let environment = try #require(HeelerSSHTransportBehaviorEnvironment.current)
+        let transport = try await HeelerSSHTransport.connect(
+            settings: environment.directSettings())
+        defer { Task { try? await transport.close() } }
+
+        let token = Self.scriptToken("notdetected")
+        await #expect(
+            throws: HerdrAPIError(
+                code: "custom_agent_not_detected",
+                message: "`cg` did not start an agent herdr recognizes. "
+                    + "The shell said: zsh: command not found: cg")
+        ) {
+            _ = try await transport.startAgent(
+                AgentLaunchRequest(
+                    kind: "claude", name: "cg", workspaceID: "workspace-1",
+                    cwd: "/fixture/\(token)", shellCommand: "cg"))
+        }
+
+        let recorded = try await Self.recordedRequests(from: transport, token: token)
+        #expect(recorded.filter { $0.hasPrefix("agent.get ") }.count >= 10)
+        #expect(recorded.last == #"pane.close {"pane_id":"pane:\#(token)"}"#)
+    }
+
     @Test("a new-workspace agent start carries its environment on workspace.create")
     func newWorkspaceAgentStartCarriesEnvironment() async throws {
         let environment = try #require(HeelerSSHTransportBehaviorEnvironment.current)

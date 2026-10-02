@@ -450,8 +450,8 @@ final class StartAgentStore {
             guard case .success(let customArguments) = customAgent.parsedArguments,
                 case .success(let entries) = customAgent.parsedEnvironment
             else { return }
-            // The profile's arguments first, the form's after: an alias's
-            // flags precede whatever is typed after it.
+            // The profile's arguments first, the form's after: both follow
+            // the profile's command, as they would follow an alias.
             launchArguments = customArguments + arguments
             environmentEntries = entries
         }
@@ -532,7 +532,8 @@ final class StartAgentStore {
             workspaceID: workspaceID,
             cwd: origin?.cwd,
             tabLabel: Self.nonEmptyTrimmed(tabLabel),
-            environment: environment)
+            environment: environment,
+            shellCommand: customAgent?.resolvedCommand)
         do {
             let agent = try await start(request, destination, hostID)
             recents.rememberAgentChoice(
@@ -786,6 +787,8 @@ final class StartAgentStore {
             "herdr rejected the command: \(apiError.message). "
                 + "Update herdr on this Host to v0.9.0 or later for Muse support, "
                 + "or choose another supported Agent."
+        case let apiError as HerdrAPIError where apiError.code == "custom_agent_not_detected":
+            apiError.message
         case let apiError as HerdrAPIError:
             "herdr rejected the command: \(apiError.message)"
         default:

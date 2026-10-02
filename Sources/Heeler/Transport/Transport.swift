@@ -483,10 +483,16 @@ struct AgentLaunchRequest: Sendable, Equatable {
     /// variables ride on the call that creates the pane and the shell hands
     /// them on. Values are passed verbatim; home expansion happens before.
     let environment: [String: String]
+    /// A Custom Agent's shell command, e.g. an alias like `cg`. When set, the
+    /// launch types `typedCommandLine` into the pane's interactive shell,
+    /// where aliases and functions exist, instead of `agent.start`, which
+    /// only runs `kind`'s own executable.
+    let shellCommand: String?
 
     init(
         kind: String, name: String, arguments: [String] = [], workspaceID: String? = nil,
-        cwd: String? = nil, tabLabel: String? = nil, environment: [String: String] = [:]
+        cwd: String? = nil, tabLabel: String? = nil, environment: [String: String] = [:],
+        shellCommand: String? = nil
     ) {
         self.kind = kind
         self.name = name
@@ -495,10 +501,17 @@ struct AgentLaunchRequest: Sendable, Equatable {
         self.cwd = cwd
         self.tabLabel = tabLabel
         self.environment = environment
+        self.shellCommand = shellCommand
     }
 
     /// The `env` parameter for the creating call; nil keeps it off the wire.
     var environmentParameter: [String: String]? { environment.isEmpty ? nil : environment }
+
+    /// The line typed for a shell-command launch: the command verbatim (it
+    /// is shell syntax the user wrote), then each argument quoted as one word.
+    var typedCommandLine: String? {
+        shellCommand.map { ([$0] + arguments.map(ShellWord.quoted)).joined(separator: " ") }
+    }
 
     /// The label the launch's tab should carry: the explicit tab label when
     /// one was given, otherwise the agent's name.
@@ -664,6 +677,25 @@ enum HerdrSessionName {
             (0x30...0x39).contains(byte) || (0x41...0x5A).contains(byte)
                 || (0x61...0x7A).contains(byte)
                 || byte == 0x2E || byte == 0x5F || byte == 0x2D
+        }
+    }
+}
+
+/// One argument quoted for an interactive shell: left bare when it holds
+/// nothing a shell would reinterpret, otherwise single-quoted with embedded
+/// quotes spliced as `'\''`, which POSIX shells and fish read alike.
+enum ShellWord {
+    static func quoted(_ word: String) -> String {
+        guard word.isEmpty || !word.unicodeScalars.allSatisfy(isBare) else { return word }
+        return "'" + word.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+    }
+
+    private static func isBare(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar {
+        case "a"..."z", "A"..."Z", "0"..."9", "-", "_", ".", "/", ",", ":", "=", "+", "@", "%":
+            true
+        default:
+            false
         }
     }
 }

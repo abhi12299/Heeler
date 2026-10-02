@@ -134,12 +134,16 @@ project is generated and git-ignored.
 
 ### Custom Agents
 
-herdr launches only the Agent kinds it supports, so a shell alias such as
-`cg() { CLAUDE_CONFIG_DIR=~/.claude-work claude --dangerously-skip-permissions "$@"; }`
-cannot be started by name. **New Agent > Custom Agents** saves the same thing
-as a profile — base Agent, arguments, `KEY=VALUE` environment (`~` and
-`$HOME` resolve to the Host's home) — and the Agent picker offers it wherever
-that Agent is installed.
+**New Agent > Custom Agents** runs your own shell aliases and functions. A
+Custom Agent named `cg` types `cg` into the new pane's interactive shell, where
+your `~/.zshrc` aliases exist, and herdr picks up the Agent it starts just as
+if you had typed it. herdr's own launch can't do this, because it only runs a
+supported Agent's executable directly. A profile can also set a different
+command, extra arguments, and `KEY=VALUE` environment (`~` and `$HOME` resolve
+to the Host's home). If the command starts no Agent within 15 seconds, the
+launch fails and shows what the shell printed (for example
+`command not found`). The picker offers each profile wherever the Agent it
+starts is installed.
 
 ### Tailscale SSH Hosts
 

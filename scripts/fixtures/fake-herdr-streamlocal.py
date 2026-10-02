@@ -36,6 +36,12 @@ NON_RETRYABLE_START_FAILURE = {
 }
 # The cosmetic rename refusal: `tab.rename` alone fails, so a test can prove
 # the launch it decorated still succeeds.
+# `agent.get` on a pane whose shell has not (yet) exec'd an agent, as herdr
+# answers it (verified live on 0.9.3).
+AGENT_NOT_FOUND = {
+    "code": "agent_not_found",
+    "message": "agent target not found",
+}
 TAB_RENAME_REFUSED = {
     "code": "fixture_tab_rename_refused",
     "message": "scripted non-retryable tab.rename failure",
@@ -89,6 +95,7 @@ class Server:
         self.script_lock = threading.Lock()
         self.recorded_requests: dict[str, list[str]] = {}
         self.agent_start_attempts: dict[str, int] = {}
+        self.agent_get_attempts: dict[str, int] = {}
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
     def start(self) -> None:
@@ -281,6 +288,11 @@ class Server:
         (the launch itself must succeed, so a test can prove a cosmetic
         rename refusal stays cosmetic).
 
+        A typed (Custom Agent) launch polls `agent.get` instead: under `ok`
+        the first poll still finds the shell (`agent_not_found`) and the next
+        finds the Agent; `notdetected` never finds one, and its `pane.read`
+        shows the shell's complaint.
+
         A word outside that set is refused rather than treated as `ok`: a
         mistyped behaviour would otherwise leave a test green while proving
         nothing, which is the one way a fixture can lie.
@@ -290,6 +302,13 @@ class Server:
         behavior = token.split(":")[1]
         if method == "tab.rename" and behavior == "renamefail":
             return dict(TAB_RENAME_REFUSED)
+        if method == "agent.get":
+            if behavior == "notdetected":
+                return dict(AGENT_NOT_FOUND)
+            with self.script_lock:
+                served = self.agent_get_attempts.get(token, 0)
+                self.agent_get_attempts[token] = served + 1
+            return dict(AGENT_NOT_FOUND) if served == 0 else None
         if method != "agent.start":
             return None
         if behavior in ("ok", "renamefail"):
@@ -573,6 +592,16 @@ class Server:
                 "argv": ["codex"],
                 "agent": self._agent(pane_id, workspace_id, tab_id=tab_id),
             }
+        if method in ("agent.get", "agent.rename"):
+            agent = self._agent(pane_id, workspace_id, tab_id=tab_id)
+            agent["agent"] = "claude"
+            if method == "agent.rename":
+                agent["name"] = "renamed"
+            return {"type": "agent_info", "agent": agent}
+        if method == "pane.read" and token.split(":")[1] == "notdetected":
+            return self._pane_read_result(
+                pane_id, "Last login: today\n% cg\nzsh: command not found: cg\n% \n"
+            )
         if method == "worktree.remove":
             return {
                 "type": "worktree_removed",

@@ -9,10 +9,11 @@ Entries reference the issue that motivated them.
 
 ### Added
 
-- Custom Agents: save an installed Agent with your own arguments and
-  environment variables, like a shell alias (for example `cg` = Claude Code
-  with `CLAUDE_CONFIG_DIR=~/.claude-work` and `--dangerously-skip-permissions`),
-  and start it from New Agent. `~` and `$HOME` resolve to the Host's home.
+- Custom Agents: start an Agent through your own shell alias or function
+  (for example `cg`) from New Agent. The app types the command into the new
+  pane's shell, where your aliases exist, then names the Agent herdr detects.
+  You can add arguments and environment variables; `~` and `$HOME` resolve to
+  the Host's home.
   New Agent also reopens on the Agent you last started on that Host.
 - Tailscale SSH Hosts: choose Tailscale SSH as a Host's authentication method,
   or scan a Tailscale SSH Pairing Code, to connect through tailscaled with no

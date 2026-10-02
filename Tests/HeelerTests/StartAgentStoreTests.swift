@@ -1315,12 +1315,12 @@ struct StartAgentStoreTests {
 
     // MARK: Custom Agents
 
-    /// The two aliases the feature exists for: `c` adds flags, `cg` adds a
-    /// config directory under the Host's home as well.
-    private static let cAlias = CustomAgent(
-        name: "c", kind: .claude, arguments: "--chrome --dangerously-skip-permissions")
+    /// The two shapes the feature exists for: `c` names the Host's own alias
+    /// and runs it as is; `cg` spells its alias out in the profile instead —
+    /// a command, flags, and a config directory under the Host's home.
+    private static let cAlias = CustomAgent(name: "c", kind: .claude)
     private static let cgAlias = CustomAgent(
-        name: "cg", kind: .claude, arguments: "--dangerously-skip-permissions",
+        name: "cg", kind: .claude, command: "claude", arguments: "--dangerously-skip-permissions",
         environment: "CLAUDE_CONFIG_DIR=~/.claude-gocomply")
 
     @Test func customAgentsAreOfferedOnlyWhereTheirKindIsInstalledAndTheyParse() async {
@@ -1336,7 +1336,7 @@ struct StartAgentStoreTests {
         #expect(store.availableCustomAgents.map(\.name) == ["c"])
     }
 
-    @Test func aCustomAgentLaunchesItsKindWithItsArgumentsBeforeTheForms() async throws {
+    @Test func aCustomAgentRunsItsNameAsTheCommandWithTheFormsArguments() async throws {
         let host = Host.fixture()
         let recorder = StartRecorder()
         let store = makeStore(
@@ -1352,11 +1352,48 @@ struct StartAgentStoreTests {
 
         let request = try #require(recorder.params.first)
         #expect(request.kind == "claude")
-        #expect(
-            request.arguments == ["--chrome", "--dangerously-skip-permissions", "--continue"])
+        #expect(request.shellCommand == "c")
+        #expect(request.arguments == ["--continue"])
+        #expect(request.typedCommandLine == "c --continue")
         #expect(request.environment == [:])
         #expect(request.name == "c")
         #expect(store.state == started(on: host))
+    }
+
+    @Test func aCustomAgentsOwnArgumentsGoBeforeTheForms() async throws {
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [.fixture()],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            remoteHome: { _ in "/Users/abhi" },
+            customAgents: { [Self.cgAlias] },
+            recorder: recorder)
+        await store.discoverAgents()
+        store.agentChoice = .custom(Self.cgAlias.id)
+        store.arguments = "--continue"
+
+        await store.submit()
+
+        let request = try #require(recorder.params.first)
+        #expect(request.shellCommand == "claude")
+        #expect(request.arguments == ["--dangerously-skip-permissions", "--continue"])
+    }
+
+    @Test func aBuiltInKindStillLaunchesThroughAgentStart() async throws {
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [.fixture()],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            customAgents: { [Self.cAlias] },
+            recorder: recorder)
+        await store.discoverAgents()
+        store.agentChoice = .builtIn(.claude)
+
+        await store.submit()
+
+        let request = try #require(recorder.params.first)
+        #expect(request.shellCommand == nil)
+        #expect(request.typedCommandLine == nil)
     }
 
     @Test func aCustomAgentsEnvironmentIsExpandedAgainstTheHostsHome() async {

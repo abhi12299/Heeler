@@ -95,12 +95,51 @@ struct CustomAgentTests {
         #expect(CustomAgentStore(defaults: defaults).agents.map(\.name) == ["c"])
     }
 
-    @Test func thePreviewReadsLikeTheAliasItReplaces() {
-        let cg = CustomAgent(
-            name: "cg", kind: .claude, arguments: #"--dangerously-skip-permissions --model "opus 5""#,
+    @Test func thePreviewReadsLikeTheLineTypedIntoTheShell() {
+        #expect(CustomAgentPreview.commandLine(for: CustomAgent(name: "cg", kind: .claude)) == "cg")
+        let spelledOut = CustomAgent(
+            name: "work", kind: .claude, command: "claude",
+            arguments: #"--dangerously-skip-permissions --model "opus 5""#,
             environment: "CLAUDE_CONFIG_DIR=~/.claude-gocomply")
         #expect(
-            CustomAgentPreview.commandLine(for: cg)
+            CustomAgentPreview.commandLine(for: spelledOut)
                 == "CLAUDE_CONFIG_DIR=~/.claude-gocomply claude --dangerously-skip-permissions --model 'opus 5'")
+    }
+
+    /// The point of a Custom Agent: naming it after an alias runs the alias.
+    @Test func theCommandIsTheNameUnlessOneIsGiven() {
+        #expect(CustomAgent(name: " cg ", kind: .claude).resolvedCommand == "cg")
+        #expect(
+            CustomAgent(name: "Work Claude", kind: .claude, command: " cg --resume ").resolvedCommand
+                == "cg --resume")
+    }
+
+    @Test func aNameThatIsNoCommandNeedsOne() {
+        #expect(
+            CustomAgent(name: "Work Claude", kind: .claude).validationMessage
+                == "Enter the command to run; the name is not one.")
+        #expect(CustomAgent(name: "Work Claude", kind: .claude, command: "cg").validationMessage == nil)
+        #expect(
+            CustomAgent(name: "cg", kind: .claude, command: "cg\nrm -rf ~").validationMessage
+                == "Keep the command on one line.")
+    }
+
+    /// Profiles saved before the command existed keep working, and run the
+    /// alias they were named after.
+    @Test func aProfileSavedWithoutACommandRunsItsName() throws {
+        let json = #"[{"id":"\#(UUID().uuidString)","name":"cg","kind":"claude","arguments":"","environment":""}]"#
+        let agents = try JSONDecoder().decode([CustomAgent].self, from: Data(json.utf8))
+        #expect(agents.first?.command == "")
+        #expect(agents.first?.resolvedCommand == "cg")
+    }
+
+    @Test func typedArgumentsReachTheCommandAsSingleWords() {
+        let request = AgentLaunchRequest(
+            kind: "claude", name: "cg",
+            arguments: ["--model", "opus 5", "it's", "$HOME", "", "a=b/c.d"],
+            shellCommand: "cg")
+        #expect(
+            request.typedCommandLine
+                == #"cg --model 'opus 5' 'it'\''s' '$HOME' '' a=b/c.d"#)
     }
 }

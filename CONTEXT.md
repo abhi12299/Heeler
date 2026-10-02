@@ -41,7 +41,7 @@ A single-use, TTL-bound Ed25519 keypair carried inside a Pairing Code. Its autho
 _Avoid_: temp key, one-time password
 
 **Custom Agent**:
-A saved launch profile over a supported Agent kind: the kind, arguments placed before the New Agent form's, and environment variables set on the pane herdr creates. Stored on the device and offered by every Host where its kind is installed. It is the app's form of a shell alias; herdr itself only ever sees the kind and argv.
+A saved launch that types a shell command (by default its own name, e.g. the user's `cg` alias) into the interactive shell of a new pane, plus arguments, and environment variables set on that pane. herdr detects the Agent the command starts, and the launch names it. The profile also records which supported Agent kind the command starts, so only Hosts where that kind is installed offer it. Stored on the device.
 _Avoid_: alias, preset, agent template
 
 **Tailscale SSH Host**:
