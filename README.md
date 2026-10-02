@@ -125,7 +125,12 @@ No paid Apple Developer account is needed to run Heeler on your own iPhone:
 A free team cannot sign push or app groups, so the free build drops the
 Notification Service and Widgets extensions and both entitlements. The trade-offs:
 
-- no Agent Notifications and no lock-screen Live Activity;
+- no push and no lock-screen Live Activity. **Background Alerts** stand in for
+  push (on by default, Settings > Notifications): Heeler keeps running in the
+  background on a silent, mixable audio session and posts the Done / needs
+  input notifications itself from the live event stream. They stop if you swipe
+  Heeler away or restart the phone (open it again to resume), cost some battery,
+  and do not pause or duck other audio;
 - the build expires after **7 days** — run `make free-install` again to renew it;
 - a free team may sideload at most **3 apps** per device.
 

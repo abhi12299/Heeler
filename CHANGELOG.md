@@ -9,6 +9,10 @@ Entries reference the issue that motivated them.
 
 ### Added
 
+- Background Alerts for the free Apple ID build, which cannot receive push:
+  Heeler stays running in the background on a silent, mixable audio session
+  and posts Agent Notifications itself when an Agent finishes or needs input.
+  On by default under Settings > Notifications; tapping one opens the Agent.
 - Custom Agents: start an Agent through your own shell alias or function
   (for example `cg`) from New Agent. The app types the command into the new
   pane's shell, where your aliases exist, then names the Agent herdr detects.

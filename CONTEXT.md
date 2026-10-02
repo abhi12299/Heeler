@@ -40,6 +40,10 @@ _Avoid_: QR code, invite
 A single-use, TTL-bound Ed25519 keypair carried inside a Pairing Code. Its authorized_keys line is restricted to a forced command that can only perform Enrollment; it is destroyed on success or expiry.
 _Avoid_: temp key, one-time password
 
+**Background Alerts**:
+The free build's stand-in for Agent Notifications: with no push entitlement, the app keeps itself running in the background (silent mixable audio) and posts local notifications from its live event stream. Lost when the app is swiped away or the phone restarts.
+_Avoid_: local push, fake push
+
 **Custom Agent**:
 A saved launch that types a shell command (by default its own name, e.g. the user's `cg` alias) into the interactive shell of a new pane, plus arguments, and environment variables set on that pane. herdr detects the Agent the command starts, and the launch names it. The profile also records which supported Agent kind the command starts, so only Hosts where that kind is installed offer it. Stored on the device.
 _Avoid_: alias, preset, agent template
