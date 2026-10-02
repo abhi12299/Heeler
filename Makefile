@@ -22,7 +22,7 @@ IOS_WATCH_DEBOUNCE ?= 1s
 DEVICE ?= $(shell python3 scripts/find-ios-device.py iPhone)
 DEVICE_IPAD ?= $(shell python3 scripts/find-ios-device.py iPad)
 
-.PHONY: help generate resolve build test test-app test-ipad test-ci-app build-device install install-ipad watch-ios-device sim sim-ipad build-sim sim-id archive upload testflight bump publish clean check-device check-device-ipad ssh-artifacts verify-ssh-artifacts
+.PHONY: free-generate free-build free-install help generate resolve build test test-app test-ipad test-ci-app build-device install install-ipad watch-ios-device sim sim-ipad build-sim sim-id archive upload testflight bump publish clean check-device check-device-ipad ssh-artifacts verify-ssh-artifacts
 
 help: ## Show available targets
 	@awk -F':.*## ' '/^[a-z-]+:.*## / { printf "  make %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -92,6 +92,31 @@ check-device-ipad:
 
 install-ipad: check-device-ipad ## Build Debug, install on the iPad, and relaunch it
 	$(MAKE) install DEVICE="$(DEVICE_IPAD)"
+
+# Free Apple ID builds (README "Free Apple ID build"): a trimmed project without
+# push, app groups, or extensions, signed by the personal team. FREE_TEAM
+# defaults to the one free team Xcode knows; FREE_BUNDLE_ID to one derived
+# from it. Builds expire after seven days; rerun free-install to refresh.
+FREE_TEAM ?=
+FREE_BUNDLE_ID ?=
+FREE_PROJECT := HeelerFree.xcodeproj
+FREE_DERIVED := build/FreeDerivedData
+
+free-generate: ## Generate HeelerFree.xcodeproj for a free Apple ID team
+	python3 scripts/free-build/generate-free-project.py \
+		$(if $(FREE_TEAM),--team '$(FREE_TEAM)') $(if $(FREE_BUNDLE_ID),--bundle-id '$(FREE_BUNDLE_ID)')
+
+free-build: check-device free-generate ## Build the free-team app for the connected iPhone
+	xcodebuild -project $(FREE_PROJECT) -scheme $(SCHEME) -configuration Debug \
+		-destination 'platform=iOS,id=$(DEVICE)' -derivedDataPath $(FREE_DERIVED) \
+		-allowProvisioningUpdates -allowProvisioningDeviceRegistration build
+
+free-install: free-build ## Build, install, and launch the free-team app on the iPhone
+	xcrun devicectl device install app --device $(DEVICE) \
+		$(FREE_DERIVED)/Build/Products/Debug-iphoneos/Heeler.app
+	xcrun devicectl device process launch --terminate-existing --device $(DEVICE) \
+		$$(cat build/free/bundle-id) \
+		|| echo "Installed, but the launch was refused. Unlock the iPhone; on first install trust the developer in Settings > General > VPN & Device Management."
 
 watch-ios-device: ## Watch iOS code and install to a connected iPhone/iPad
 	@command -v watchexec >/dev/null || { echo "watchexec not found. Install with: brew install watchexec"; exit 1; }
