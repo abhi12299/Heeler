@@ -35,6 +35,8 @@ final class HeelerAppModel {
     let inputMode: AgentInputModeSettings
     let relaySettings: NotificationRelaySettings
     let bannerStore: AgentNotificationBannerStore
+    /// Local Agent Notifications for the free build, which cannot get push.
+    let backgroundAlerts: BackgroundAlertsController
     let liveActivities: HostLiveActivityCoordinator
     let activity: AppActivityCoordinator
 
@@ -52,13 +54,15 @@ final class HeelerAppModel {
         sceneDirectory: AgentSceneDirectory,
         hostStore: HostStore = HostStore(),
         console: ConsoleStore = ConsoleStore(),
-        activity: AppActivityCoordinator = AppActivityCoordinator()
+        activity: AppActivityCoordinator = AppActivityCoordinator(),
+        backgroundAlerts: BackgroundAlertsController = BackgroundAlertsController()
     ) {
         self.pushRegistration = pushRegistration
         self.sceneDirectory = sceneDirectory
         self.hostStore = hostStore
         self.console = console
         self.activity = activity
+        self.backgroundAlerts = backgroundAlerts
         terminalThemes = TerminalThemeSettings()
         terminalZoom = TerminalZoomSettings()
         terminalFonts = TerminalFontSettings()
@@ -80,10 +84,16 @@ final class HeelerAppModel {
         // reads the key window's Agent at fire time; the preference gate
         // reads each Host's confirmed notify flags and fails closed on
         // unknowns.
+        // A Host without a push registration falls back to Background
+        // Alerts' flags, which exist only while they are on in the free build.
         bannerStore = AgentNotificationBannerStore(
             presentedAgent: { [weak sceneDirectory] in sceneDirectory?.keyScenePresentedAgent },
-            triggers: { [weak notificationPreferences] in
+            triggers: { [weak notificationPreferences, weak backgroundAlerts] in
                 notificationPreferences?.confirmedTriggers(for: $0)
+                    ?? backgroundAlerts?.fallbackTriggers
+            },
+            backgroundDelivery: { [weak backgroundAlerts] in
+                backgroundAlerts?.deliver($0) ?? false
             })
         // One Live Activity per Host: the Console Agent list is the source
         // of truth while foregrounded; the plugin takes over over APNs
@@ -149,6 +159,10 @@ final class HeelerAppModel {
         // mirror; refresh it before a locked widget render needs it.
         NotificationKeyStore().refreshMirror()
         liveActivities.start()
+        // `onChange(of: scenePhase)` never reports the launch's initial
+        // `.active`, so arm Background Alerts here: a window is starting,
+        // which means the app is in the foreground.
+        backgroundAlerts.sceneDidBecomeActive()
 
         observeStores()
     }
@@ -157,13 +171,20 @@ final class HeelerAppModel {
     func scenePhaseDidChange(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            backgroundAlerts.sceneDidBecomeActive()
             activity.didBecomeActive()
             // Re-probes notification permission on every return, grace
             // period or not: the user may have flipped it in the Settings
             // app while we were backgrounded.
             Task { await pushRegistration.refresh() }
         case .background:
-            activity.didEnterBackground()
+            backgroundAlerts.sceneDidEnterBackground()
+            // While Background Alerts keep the process awake, the Host
+            // connections must survive backgrounding: the event stream is
+            // what the alerts come from. Otherwise the grace period applies.
+            if !backgroundAlerts.keepsConnectionsInBackground {
+                activity.didEnterBackground()
+            }
         default:
             break
         }
@@ -211,6 +232,10 @@ final class HeelerAppModel {
         }
         observe({ activity.activationCount }) { [weak self] _ in
             self?.liveActivities.reconcile()
+        }
+        let backgroundAlertSettings = BackgroundAlertsSettings.shared
+        observe({ backgroundAlertSettings.isEnabled }) { [weak self] _ in
+            self?.backgroundAlerts.settingsDidChange()
         }
         observe({ pushRegistration.deviceToken }) { [weak self] _ in
             guard let self else { return }

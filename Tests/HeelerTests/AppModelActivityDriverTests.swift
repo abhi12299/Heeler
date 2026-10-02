@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import Heeler
@@ -69,6 +70,59 @@ struct AppModelActivityDriverTests {
         try await waitUntil("the driver should release the background assertion") {
             granter.endedTokens == granter.beginTokens && granter.endedTokens.count == 1
         }
+        console.setHosts([])
+    }
+
+    /// Background Alerts (free build) post from the live event stream, so
+    /// while their keep-alive holds the process awake, backgrounding must
+    /// leave the connections up: no grace period, no teardown.
+    @Test func backgroundAlertsKeepTheConsoleConnectedInTheBackground() async throws {
+        final class AwakeKeepAlive: BackgroundKeepAlive {
+            var isRunning = false
+            func start() { isRunning = true }
+            func stop() { isRunning = false }
+        }
+        final class SilentNotifier: LocalNotificationPosting {
+            func requestAuthorization() {}
+            func post(_ request: LocalAgentNotification.Request) {}
+        }
+        let host = Host.fixture()
+        let transport = ScriptedTransport(snapshot: .fixture())
+        let console = ConsoleStore(snapshotRetryDelay: .milliseconds(10)) { _, subscriptions in
+            EventsSession(
+                subscriptions: subscriptions,
+                connect: { transport },
+                reconnectPolicy: ReconnectPolicy(
+                    initialDelay: .milliseconds(10), multiplier: 2,
+                    maxDelay: .milliseconds(50)),
+                keepalive: .default)
+        }
+        let granter = RecordingBackgroundExecutionGranter()
+        let suite = "app-model-background-alerts-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let app = HeelerAppModel(
+            pushRegistration: PushRegistrationStore(
+                client: ScriptedPushRegistrationClient(), environment: .sandbox),
+            sceneDirectory: AgentSceneDirectory(),
+            hostStore: HostStore(volatileHosts: [host]),
+            console: console,
+            activity: AppActivityCoordinator(gracePeriod: .milliseconds(50), granter: granter),
+            backgroundAlerts: BackgroundAlertsController(
+                settings: BackgroundAlertsSettings(defaults: defaults),
+                keepAlive: AwakeKeepAlive(), notifier: SilentNotifier(), isAvailable: true))
+        app.start()
+        try await waitUntil("the injected Host should come up connected") {
+            console.hostStatuses[host.id] == .connected
+        }
+
+        // No `.active` first: SwiftUI never reports the launch's initial
+        // phase, so `start()` alone must have armed the keep-alive.
+        app.scenePhaseDidChange(.background)
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(console.hostStatuses[host.id] == .connected)
+        #expect(granter.beginTokens.isEmpty)
         console.setHosts([])
     }
 

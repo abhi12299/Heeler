@@ -14,6 +14,11 @@ struct NotificationSettingsView: View {
 
     var body: some View {
         Form {
+            #if HEELER_FREE_BUILD
+                // A free build cannot register for push, so every section
+                // below would only ever say so; Background Alerts replace them.
+                BackgroundAlertsSection()
+            #else
             Section {
                 notificationRow
             } header: {
@@ -39,6 +44,7 @@ struct NotificationSettingsView: View {
             // self-builder; empty leaves every Host's plugin config alone.
             // Last on purpose — it is the one section most users never touch.
             customRelaySection
+            #endif
         }
         .readableColumnPage()
         .navigationTitle("Notifications")

@@ -36,6 +36,8 @@ final class AgentNotificationBannerStore {
     @ObservationIgnored private let triggers:
         @MainActor (Host.ID) -> NotificationTriggerPreferences?
     @ObservationIgnored private let playSound: @MainActor () -> Void
+    @ObservationIgnored private let backgroundDelivery:
+        @MainActor (AgentNotificationBanner) -> Bool
 
     /// - Parameters:
     ///   - holdDuration: how long a transition must hold before announcing.
@@ -46,18 +48,23 @@ final class AgentNotificationBannerStore {
     ///     unreachable, still loading) means no banner.
     ///   - playSound: the banner's sound; 1007 is the system SMS-alert tone,
     ///     played through the alert route so the ringer switch is honored.
+    ///   - backgroundDelivery: hands a fired transition to Background Alerts
+    ///     while the app is backgrounded; true means it went out as a local
+    ///     notification and no in-app banner follows.
     init(
         holdDuration: Duration = .seconds(3),
         dismissDelay: Duration = .seconds(5),
         presentedAgent: @escaping @MainActor () -> ConsoleAgent.ID?,
         triggers: @escaping @MainActor (Host.ID) -> NotificationTriggerPreferences?,
-        playSound: @escaping @MainActor () -> Void = { AudioServicesPlayAlertSound(1007) }
+        playSound: @escaping @MainActor () -> Void = { AudioServicesPlayAlertSound(1007) },
+        backgroundDelivery: @escaping @MainActor (AgentNotificationBanner) -> Bool = { _ in false }
     ) {
         self.holdDuration = holdDuration
         self.dismissDelay = dismissDelay
         self.presentedAgent = presentedAgent
         self.triggers = triggers
         self.playSound = playSound
+        self.backgroundDelivery = backgroundDelivery
     }
 
     /// The Console feed, same as the router's: diff each pane's status
@@ -106,17 +113,21 @@ final class AgentNotificationBannerStore {
     /// show the banner with the push renderer's exact copy.
     private func present(_ agent: ConsoleAgent, status: AgentStatus) {
         let target = AgentNotificationTarget(hostID: agent.hostID, paneID: agent.agent.paneID)
+        guard let notify = triggers(agent.hostID),
+            status == .done ? notify.done : notify.blocked
+        else { return }
+        let announcement = AgentNotificationBanner(
+            target: target,
+            alert: AgentNotificationRenderer.alert(
+                workspace: agent.workspaceLabel, agentKind: agent.agent.kind, status: status))
+        // In the background nobody is looking at the presented Agent, so
+        // its suppression applies only to the in-app banner.
+        if backgroundDelivery(announcement) { return }
         guard
             !AgentNotificationRouting.shouldSuppressBanner(
                 target: target, presentedAgent: presentedAgent())
         else { return }
-        guard let notify = triggers(agent.hostID),
-            status == .done ? notify.done : notify.blocked
-        else { return }
-        banner = AgentNotificationBanner(
-            target: target,
-            alert: AgentNotificationRenderer.alert(
-                workspace: agent.workspaceLabel, agentKind: agent.agent.kind, status: status))
+        banner = announcement
         playSound()
         armDismissal()
     }

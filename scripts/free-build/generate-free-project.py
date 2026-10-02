@@ -13,7 +13,10 @@ it, and leaves the upstream project, entitlements, and Info.plist untouched:
 - entitlements are empty (no aps-environment, no application-groups), and
   Live Activities are not declared, since no widget extension renders them;
 - the bundle id moves to one the free team can register, and the team is the
-  personal team.
+  personal team;
+- the `audio` background mode is declared, which Background Alerts use to
+  stay running and post Agent Notifications locally (no push without a
+  paid team).
 
 Without the app group the app degrades on its own: the Notification Key
 mirror's container URL is nil, Keychain reads in the shared access group fail
@@ -85,6 +88,9 @@ def free_spec(spec, team, bundle_id):
     # point at the committed ones.
     app["entitlements"] = {"path": str(OUT / "Heeler.entitlements"), "properties": {}}
     app["info"]["path"] = str(OUT / "Info.plist")
+    # Background Alerts stay running on a silent, mixable audio session:
+    # a background mode is an Info.plist key, not an entitlement.
+    app["info"]["properties"]["UIBackgroundModes"] = ["audio"]
     # Off its info path, the committed Info.plist would be copied in as a
     # resource and collide with the generated one.
     for source in app["sources"]:

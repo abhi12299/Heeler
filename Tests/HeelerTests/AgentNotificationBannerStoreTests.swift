@@ -23,6 +23,9 @@ struct AgentNotificationBannerStoreTests {
         var presentedAgent: ConsoleAgent.ID?
         var triggers: [UUID: NotificationTriggerPreferences] = [:]
         var soundCount = 0
+        /// Whether Background Alerts take the next announcement.
+        var deliversInBackground = false
+        var backgroundDeliveries: [AgentNotificationBanner] = []
     }
 
     private let world = World()
@@ -37,7 +40,12 @@ struct AgentNotificationBannerStoreTests {
             dismissDelay: dismissDelay,
             presentedAgent: { world.presentedAgent },
             triggers: { world.triggers[$0] },
-            playSound: { world.soundCount += 1 })
+            playSound: { world.soundCount += 1 },
+            backgroundDelivery: { banner in
+                guard world.deliversInBackground else { return false }
+                world.backgroundDeliveries.append(banner)
+                return true
+            })
     }
 
     private func agent(
@@ -300,5 +308,53 @@ struct AgentNotificationBannerStoreTests {
         store.dismiss()
 
         #expect(store.banner == nil)
+    }
+
+    // MARK: Background Alerts
+
+    @Test func aBackgroundedTransitionGoesOutAsALocalNotificationInstead() async throws {
+        world.triggers[hostID] = NotificationTriggerPreferences()
+        world.deliversInBackground = true
+        let store = makeStore()
+        store.agentsDidChange([agent("wV:p1", .working)])
+
+        store.agentsDidChange([agent("wV:p1", .done)])
+
+        try await waitUntil("delivered in the background") {
+            world.backgroundDeliveries.count == 1
+        }
+        #expect(
+            world.backgroundDeliveries.first?.target
+                == AgentNotificationTarget(hostID: hostID, paneID: "wV:p1"))
+        #expect(store.banner == nil)
+        #expect(world.soundCount == 0)
+    }
+
+    /// Nobody is looking at the screen in the background, so the presented
+    /// Agent's own transition is exactly the one worth a notification.
+    @Test func thePresentedAgentStillNotifiesFromTheBackground() async throws {
+        world.triggers[hostID] = NotificationTriggerPreferences()
+        world.presentedAgent = ConsoleAgent.ID(hostID: hostID, paneID: "wV:p1")
+        world.deliversInBackground = true
+        let store = makeStore()
+        store.agentsDidChange([agent("wV:p1", .working)])
+
+        store.agentsDidChange([agent("wV:p1", .blocked)])
+
+        try await waitUntil("delivered in the background") {
+            world.backgroundDeliveries.count == 1
+        }
+    }
+
+    @Test func backgroundDeliveryKeepsTheNotifyFlags() async throws {
+        world.triggers[hostID] = NotificationTriggerPreferences(blocked: true, done: false)
+        world.deliversInBackground = true
+        let store = makeStore()
+        store.agentsDidChange([agent("wV:p1", .working)])
+
+        store.agentsDidChange([agent("wV:p1", .done)])
+
+        try await waitPastHold()
+        #expect(world.backgroundDeliveries.isEmpty)
     }
 }

@@ -51,10 +51,13 @@ final class AgentNotificationCenterDelegate: NSObject, UNUserNotificationCenterD
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let isDefaultTap = response.actionIdentifier == UNNotificationDefaultActionIdentifier
+        let userInfo = response.notification.request.content.userInfo
+        // A Background Alert carries its target in the clear; a push needs
+        // its envelope decrypted.
         let target: AgentNotificationTarget? =
             isDefaultTap
-            ? AgentNotificationRouting.target(
-                userInfo: response.notification.request.content.userInfo, keys: loadKeys())
+            ? LocalAgentNotification.target(userInfo: userInfo)
+                ?? AgentNotificationRouting.target(userInfo: userInfo, keys: loadKeys())
             : nil
         let complete = UncheckedSendable(completionHandler)
         Task { @MainActor [directory] in
