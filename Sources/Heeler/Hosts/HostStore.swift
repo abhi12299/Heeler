@@ -188,7 +188,7 @@ final class HostStore {
     private func applyPassword(_ password: String?, to host: Host) throws {
         let account = Self.passwordAccount(for: host.id)
         switch host.authMethod {
-        case .deviceKey, .rsaKey:
+        case .deviceKey, .rsaKey, .tailscale:
             // Secret hygiene: a Host switched off password auth keeps no
             // stale password around.
             try secrets.removeSecret(account: account)

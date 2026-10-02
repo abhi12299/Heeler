@@ -52,6 +52,7 @@ struct HostFormView: View {
                         Text("Device Key").tag(Host.AuthMethod.deviceKey)
                         Text("RSA Key").tag(Host.AuthMethod.rsaKey)
                         Text("Password").tag(Host.AuthMethod.password)
+                        Text("Tailscale SSH").tag(Host.AuthMethod.tailscale)
                     }
                     .onChange(of: draft.authMethod) {
                         didCopyKeyLine = false
@@ -71,6 +72,8 @@ struct HostFormView: View {
                         SecureField(
                             editing == nil ? "Password" : "Password (blank keeps current)",
                             text: $draft.password)
+                    case .tailscale:
+                        EmptyView()
                     }
                 } header: {
                     Text("Authentication")
@@ -86,6 +89,13 @@ struct HostFormView: View {
                                 + "The private key never leaves this device.")
                     case .password:
                         EmptyView()
+                    case .tailscale:
+                        Text(
+                            "For a Host running Tailscale SSH (tailscale set --ssh), reached on "
+                                + "its tailnet address or MagicDNS name, port 22. Your tailnet "
+                                + "policy authorizes this device; nothing is installed on the "
+                                + "Host. If the policy asks for a check, Heeler shows the "
+                                + "Tailscale login link.")
                     }
                 }
 
@@ -198,6 +208,8 @@ struct HostFormView: View {
                 "Both machines must authorize the RSA Key."
             case .password:
                 "Both machines must accept the same password; separate passwords are not supported."
+            case .tailscale:
+                "Both machines must run Tailscale SSH and allow this device."
             }
         return "The Host's Address and Port are resolved from the Jump Host, usually through "
             + "a loopback-only reverse tunnel. \(credentialRequirement) You confirm each "

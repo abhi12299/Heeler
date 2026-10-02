@@ -188,6 +188,7 @@ struct HostOnboardingView: View {
         } message: {
             Text(sessionSelectionError ?? "")
         }
+        .tailscaleCheckPrompt()
         .task {
             if store.phase == .idle {
                 await store.runChecks()
@@ -200,6 +201,7 @@ struct HostOnboardingView: View {
         case .deviceKey: "Device Key"
         case .rsaKey: "RSA Key"
         case .password: "Password"
+        case .tailscale: "Tailscale SSH"
         }
     }
 

@@ -37,6 +37,8 @@ struct HostCredentialsProvider: Sendable {
                 throw HostCredentialsError.passwordNotSet
             }
             return .password(String(decoding: data, as: UTF8.self))
+        case .tailscale:
+            return .tailnetIdentity
         }
     }
 

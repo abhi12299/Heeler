@@ -75,7 +75,16 @@ struct PreflightReport: Equatable, Sendable {
                     + "register it wherever that Host accepts SSH identities."
             case .password:
                 hint = "The Host rejected the login. Check the username and password."
+            case .tailscale:
+                hint =
+                    "The Host did not accept Tailscale SSH authentication. Check that "
+                    + "Tailscale SSH is on there (tailscale set --ssh) and that the port is 22."
             }
+        case .tailscaleSSHDenied(let message):
+            check = .connection
+            hint =
+                "Tailscale SSH refused the connection: \(message). Allow this device and "
+                + "user in the ssh section of your tailnet policy, then run the checks again."
         case .deviceKeyCorrupt:
             check = .connection
             hint =
@@ -190,6 +199,9 @@ struct PreflightReport: Equatable, Sendable {
             case .password:
                 "The Jump Host rejected the login. It must accept the same password configured "
                     + "for this Host; separate passwords are not supported."
+            case .tailscale:
+                "The Jump Host did not accept Tailscale SSH authentication. Check that "
+                    + "Tailscale SSH is on there."
             }
         case .hostKeyRejected:
             "The Jump Host's key was not confirmed. Run the checks again and confirm "

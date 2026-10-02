@@ -11,6 +11,9 @@ struct Host: Identifiable, Codable, Hashable, Sendable {
         case deviceKey
         case rsaKey
         case password
+        /// Tailscale SSH: the tailnet identity and ACL authorize the phone,
+        /// so nothing is enrolled on the Host.
+        case tailscale
     }
 
     let id: UUID

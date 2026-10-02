@@ -39,6 +39,7 @@ struct ContentView: View {
             liveActivities: app.liveActivities,
             activity: app.activity
         )
+        .tailscaleCheckPrompt()
         .environment(\.sceneWindow, window)
         .environment(
             \.agentSceneRouting,

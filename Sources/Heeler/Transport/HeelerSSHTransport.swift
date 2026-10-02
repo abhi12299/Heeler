@@ -421,6 +421,7 @@ actor HeelerSSHTransport: Transport {
                 .verify(targetConnection.hostKey)
             try await authenticate(
                 targetConnection,
+                host: settings.host,
                 username: settings.username,
                 credentials: settings.credentials,
                 timeout: settings.requestTimeout)
@@ -492,6 +493,7 @@ actor HeelerSSHTransport: Transport {
                 .verify(connection.hostKey)
             try await authenticate(
                 connection,
+                host: endpoint.host,
                 username: username,
                 credentials: credentials,
                 timeout: timeout)
@@ -504,11 +506,14 @@ actor HeelerSSHTransport: Transport {
 
     private static func authenticate(
         _ connection: SSHConnection,
+        host: String,
         username: String,
         credentials: SSHCredentials,
         timeout: Duration
     ) async throws {
         switch credentials {
+        case .tailnetIdentity:
+            try await authenticateTailnetIdentity(connection, host: host, username: username)
         case .password(let password):
             try await connection.authenticate(
                 username: username,
@@ -533,6 +538,40 @@ actor HeelerSSHTransport: Transport {
                 // this can only mean no RSA-SHA2-512 signature was possible.
                 throw TransportError.rsaSignatureUnsupported
             }
+        }
+    }
+
+    /// Tailscale SSH `none` authentication. A `check` login URL is surfaced
+    /// app-wide while tailscaled holds the request; a refusal is reported in
+    /// tailscaled's own words when it gave any.
+    private static func authenticateTailnetIdentity(
+        _ connection: SSHConnection,
+        host: String,
+        username: String
+    ) async throws {
+        let attempt = UUID()
+        let banners = TailscaleBannerLog()
+        defer {
+            Task { @MainActor in TailscaleCheckPrompts.shared.finish(attempt) }
+        }
+        do {
+            try await connection.authenticateNone(
+                username: username,
+                timeout: TailscaleSSH.authenticationBudget
+            ) { banner in
+                banners.append(banner)
+                guard let url = TailscaleSSH.loginURL(inBanner: banner) else { return }
+                Task { @MainActor in
+                    TailscaleCheckPrompts.shared.present(
+                        .init(id: attempt, host: host, url: url))
+                }
+            }
+        } catch SSHError.authenticationFailed {
+            if let banner = banners.last {
+                throw TransportError.tailscaleSSHDenied(
+                    message: TailscaleSSH.denialMessage(fromBanner: banner))
+            }
+            throw SSHError.authenticationFailed
         }
     }
 
