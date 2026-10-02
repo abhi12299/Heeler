@@ -22,9 +22,24 @@ struct PairingCode: Sendable, Equatable {
     /// SSH username.
     let username: String
     /// The Host's SSH host key fingerprint, pinned instead of a TOFU prompt.
-    let hostKeyFingerprint: HostKeyFingerprint
+    /// Always present on an OpenSSH code; a Tailscale SSH code may omit it,
+    /// since tailscaled's host keys are root-only on the Host, and the app
+    /// then trusts the key tailscaled presents over the tailnet.
+    let hostKeyFingerprint: HostKeyFingerprint?
     /// The Bootstrap Key material, absent on a config-only Pairing Code.
     let bootstrap: Bootstrap?
+    /// What authorizes this device on the Host.
+    var authorization: Authorization = .openSSH
+
+    /// What authorizes this device on the Host (wire field `auth`).
+    enum Authorization: Sendable, Equatable {
+        /// OpenSSH: the Device Key, enrolled through the Bootstrap Key's
+        /// forced command (ADR 0007). Wire: `auth` absent.
+        case openSSH
+        /// Tailscale SSH: the tailnet identity and ACL. Nothing is enrolled
+        /// and the code carries no secret. Wire: `"auth": "tailscale"`.
+        case tailscale
+    }
 
     /// The single-use Enrollment credential carried inside a Pairing Code.
     /// Lives in memory only; never enters the Keychain (ADR 0007).
@@ -83,8 +98,19 @@ struct PairingCode: Sendable, Equatable {
         guard let username = wire.user, !username.isEmpty, !containsWhitespace(username) else {
             throw .badPayload(reason: "username must be a non-empty string without whitespace")
         }
-        guard let fingerprint = parseFingerprint(wire.fp) else {
+        let authorization: Authorization
+        switch wire.auth {
+        case nil: authorization = .openSSH
+        case "tailscale": authorization = .tailscale
+        case let other?: throw .badPayload(reason: "unsupported auth: \(other)")
+        }
+
+        let fingerprint = parseFingerprint(wire.fp)
+        if fingerprint == nil, wire.fp != nil || authorization == .openSSH {
             throw .badPayload(reason: "fp must be an OpenSSH SHA256 fingerprint")
+        }
+        if authorization == .tailscale, wire.seed != nil || wire.exp != nil {
+            throw .badPayload(reason: "a Tailscale SSH code carries no Bootstrap Key")
         }
 
         let bootstrap: Bootstrap?
@@ -107,7 +133,8 @@ struct PairingCode: Sendable, Equatable {
 
         return PairingCode(
             addresses: addresses, port: port, username: username,
-            hostKeyFingerprint: fingerprint, bootstrap: bootstrap)
+            hostKeyFingerprint: fingerprint, bootstrap: bootstrap,
+            authorization: authorization)
     }
 
     private static let bootstrapSeedBytes = 32
@@ -123,6 +150,7 @@ struct PairingCode: Sendable, Equatable {
         var fp: String?
         var seed: String?
         var exp: Double?
+        var auth: String?
     }
 
     /// OpenSSH presentation: "SHA256:" + 43 chars of unpadded standard base64

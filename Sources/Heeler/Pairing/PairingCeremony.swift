@@ -32,6 +32,12 @@ enum PairingCeremonyError: Error, Sendable, Equatable {
     /// open for a browser login, and an `accept` one would run the requested
     /// command as the user.
     case tailscaleSSH(addresses: [String], port: Int)
+    /// A Tailscale SSH code reached tailscaled, and the tailnet policy refused
+    /// this device or user. Carries tailscaled's own words when it gave any.
+    case tailscaleSSHDenied(message: String?)
+    /// A Tailscale SSH code, but nothing at its addresses identified as
+    /// Tailscale SSH: the phone is off the tailnet, or SSH is off on the Host.
+    case tailscaleSSHUnavailable(detail: String)
     /// The Host is there — its key matched the pinned fingerprint — but it
     /// rejected the Bootstrap Key: the code was already used, its line
     /// expired and was swept, or the popup was closed.
@@ -54,8 +60,8 @@ enum PairingCeremonyError: Error, Sendable, Equatable {
     /// The Pairing step this failure is attributed to.
     var step: PairingStep {
         switch self {
-        case .hostUnreachable, .tailscaleSSH: .reach
-        case .bootstrapRejected: .authenticate
+        case .hostUnreachable, .tailscaleSSH, .tailscaleSSHUnavailable: .reach
+        case .bootstrapRejected, .tailscaleSSHDenied: .authenticate
         case .enrollmentRefused, .enrollmentUnanswered, .enrollmentFailed: .enroll
         case .verificationFailed: .verify
         }
@@ -96,8 +102,11 @@ struct PairingResult: Sendable, Equatable {
     let username: String
     /// The fingerprint the Host actually presented, digest-equal to the
     /// pinned one from the Pairing Code but algorithm-aware, ready for the
-    /// known-hosts store.
+    /// known-hosts store. On a Tailscale SSH code without a pin, the key
+    /// tailscaled presented.
     let hostKeyFingerprint: HostKeyFingerprint
+    /// How the persisted Host authenticates from now on.
+    var authMethod: Host.AuthMethod = .deviceKey
 }
 
 /// One line of the Enrollment accept stdout protocol:

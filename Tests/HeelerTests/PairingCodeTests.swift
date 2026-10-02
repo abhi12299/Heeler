@@ -24,7 +24,8 @@ struct PairingCodeTests {
         #expect(code.addresses == vector.payload.addresses)
         #expect(code.port == vector.payload.port)
         #expect(code.username == vector.payload.username)
-        #expect(code.hostKeyFingerprint.displayString == vector.payload.hostKeyFingerprint)
+        #expect(code.hostKeyFingerprint?.displayString == vector.payload.hostKeyFingerprint)
+        #expect(code.authorization == (vector.payload.auth == "tailscale" ? .tailscale : .openSSH))
 
         if let expectedSeed = vector.payload.bootstrapSeed {
             let bootstrap = try #require(code.bootstrap)

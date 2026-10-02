@@ -283,7 +283,10 @@ struct PairingScanStoreTests {
 
     @Test(arguments: [
         (PairingCeremonyError.hostUnreachable(detail: "x"), true, "same network"),
-        (.tailscaleSSH(addresses: ["100.64.0.1"], port: 22), false, "ssh_port in the pairing"),
+        (.tailscaleSSH(addresses: ["100.64.0.1"], port: 22), false, "\"auth\": \"tailscale\""),
+        (.tailscaleSSHDenied(message: "tailnet policy does not permit you to SSH as user \"root\""),
+         true, "as user \"root\""),
+        (.tailscaleSSHUnavailable(detail: "x"), true, "tailscale set --ssh"),
         (.bootstrapRejected, false, "Generate a new Pairing Code"),
         (.enrollmentRefused(.unknownPairing), false, "Generate a new Pairing Code"),
         (.enrollmentRefused(.expired), false, "expired"),

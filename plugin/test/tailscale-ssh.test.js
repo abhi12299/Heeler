@@ -1,13 +1,19 @@
 import { suite, test } from "node:test";
 import assert from "node:assert/strict";
 
+import { publicLineFromSeed } from "../src/bootstrap-key.js";
 import {
   detectTailscaleSSH,
   mayBeTailscaleAddress,
   runTailscale,
+  tailnetCandidates,
+  tailscaleHostKeyFingerprint,
   tailscaleSSHConflict,
 } from "../src/tailscale-ssh.js";
 
+const HOMEBREW_ARM = "/opt/homebrew/bin/tailscale";
+const HOMEBREW_INTEL = "/usr/local/bin/tailscale";
+const NOT_SERVING = { enabled: false, addresses: [], dnsName: null, hostKeyFingerprint: null };
 const BUNDLE_UPPER = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 const BUNDLE_LOWER = "/Applications/Tailscale.app/Contents/MacOS/tailscale";
 
@@ -66,18 +72,47 @@ suite("running the tailscale CLI", () => {
     assert.ok(calls[0].options.timeout > 0, "a wedged tailscaled must not hang the popup");
   });
 
-  test("falls through to the app bundle when PATH has none", () => {
+  // herdr may start the popup without the shell's PATH; measured on a Mac
+  // running Homebrew's tailscaled, the CLI lives only at /opt/homebrew/bin.
+  test("falls through to the Homebrew prefixes when PATH has none", () => {
+    for (const [path, expected] of [
+      [HOMEBREW_ARM, ["tailscale", HOMEBREW_ARM]],
+      [HOMEBREW_INTEL, ["tailscale", HOMEBREW_ARM, HOMEBREW_INTEL]],
+    ]) {
+      const { spawnFn, calls } = fakeSpawn({ [path]: { status: 0, stdout: "up" } });
+
+      assert.equal(runTailscale(["status"], { spawnFn }), "up");
+      assert.deepEqual(calls.map((call) => call.command), expected);
+    }
+  });
+
+  test("falls through to the app bundle when PATH and Homebrew have none", () => {
     const { spawnFn, calls } = fakeSpawn({ [BUNDLE_UPPER]: { status: 0, stdout: "up" } });
 
     assert.equal(runTailscale(["status"], { spawnFn }), "up");
-    assert.deepEqual(calls.map((call) => call.command), ["tailscale", BUNDLE_UPPER]);
+    assert.deepEqual(calls.map((call) => call.command), [
+      "tailscale",
+      HOMEBREW_ARM,
+      HOMEBREW_INTEL,
+      BUNDLE_UPPER,
+    ]);
   });
 
   test("tries the lowercase bundle path a case-sensitive volume would need", () => {
     const { spawnFn, calls } = fakeSpawn({ [BUNDLE_LOWER]: { status: 0, stdout: "up" } });
 
     assert.equal(runTailscale(["status"], { spawnFn }), "up");
-    assert.deepEqual(calls.length, 3);
+    assert.deepEqual(calls.length, 5);
+  });
+
+  test("stops at the first timeout: every location talks to the same tailscaled", () => {
+    const { spawnFn, calls } = fakeSpawn({
+      tailscale: { error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) },
+      [HOMEBREW_ARM]: { status: 0, stdout: "up" },
+    });
+
+    assert.equal(runTailscale(["status"], { spawnFn }), null);
+    assert.equal(calls.length, 1);
   });
 
   test("treats a non-zero exit as no answer", () => {
@@ -92,7 +127,7 @@ suite("running the tailscale CLI", () => {
     const { spawnFn, calls } = fakeSpawn({});
 
     assert.equal(runTailscale(["status"], { spawnFn }), null);
-    assert.equal(calls.length, 3, "every candidate location is tried before giving up");
+    assert.equal(calls.length, 5, "every candidate location is tried before giving up");
   });
 });
 
@@ -111,8 +146,41 @@ suite("tailscale SSH detection", () => {
     assert.deepEqual(detectTailscaleSSH({ run }), {
       enabled: true,
       addresses: ["100.73.39.6", "fd7a:115c:a1e0::c839:2707"],
+      dnsName: null,
+      hostKeyFingerprint: null,
     });
     assert.deepEqual(calls, ["status --json", "debug prefs"]);
+  });
+
+  // Shape measured on a Mac running Homebrew's tailscaled 1.102.5: DNSName
+  // carries the root dot, and sshHostKeys is absent from Self.
+  test("reports the MagicDNS name without its trailing dot", () => {
+    const { run } = fakeRun({
+      "debug prefs": JSON.stringify({ RunSSH: true }),
+      "status --json": JSON.stringify({
+        Self: {
+          TailscaleIPs: ["100.125.174.14", "fd7a:115c:a1e0::1"],
+          DNSName: "abhi-mac.taild99ff3.ts.net.",
+        },
+      }),
+    });
+
+    assert.deepEqual(detectTailscaleSSH({ run }), {
+      enabled: true,
+      addresses: ["100.125.174.14", "fd7a:115c:a1e0::1"],
+      dnsName: "abhi-mac.taild99ff3.ts.net",
+      hostKeyFingerprint: null,
+    });
+  });
+
+  test("ignores an empty or malformed MagicDNS name", () => {
+    for (const DNSName of ["", ".", "a b.ts.net.", 42, null]) {
+      const { run } = fakeRun({
+        "debug prefs": JSON.stringify({ RunSSH: true }),
+        "status --json": JSON.stringify({ Self: { TailscaleIPs: ["100.1.2.3"], DNSName } }),
+      });
+      assert.equal(detectTailscaleSSH({ run }).dnsName, null, JSON.stringify(DNSName));
+    }
   });
 
   test("falls back to the status host keys when prefs stops answering", () => {
@@ -125,6 +193,8 @@ suite("tailscale SSH detection", () => {
     assert.deepEqual(detectTailscaleSSH({ run }), {
       enabled: true,
       addresses: ["100.73.39.6"],
+      dnsName: null,
+      hostKeyFingerprint: null,
     });
   });
 
@@ -134,7 +204,7 @@ suite("tailscale SSH detection", () => {
       "status --json": JSON.stringify({ Self: { TailscaleIPs: ["100.73.39.6"] } }),
     });
 
-    assert.deepEqual(detectTailscaleSSH({ run }), { enabled: false, addresses: [] });
+    assert.deepEqual(detectTailscaleSSH({ run }), NOT_SERVING);
   });
 
   test("stays quiet when tailscale is absent or unreadable", () => {
@@ -145,14 +215,95 @@ suite("tailscale SSH detection", () => {
       { "status --json": JSON.stringify({ Self: null }) },
     ]) {
       const { run } = fakeRun(responses);
-      assert.deepEqual(detectTailscaleSSH({ run }), { enabled: false, addresses: [] });
+      assert.deepEqual(detectTailscaleSSH({ run }), NOT_SERVING);
     }
   });
 
   test("serving with no readable addresses warns about nothing", () => {
     const { run } = fakeRun({ "debug prefs": JSON.stringify({ RunSSH: true }) });
 
-    assert.deepEqual(detectTailscaleSSH({ run }), { enabled: true, addresses: [] });
+    assert.deepEqual(detectTailscaleSSH({ run }), {
+      enabled: true,
+      addresses: [],
+      dnsName: null,
+      hostKeyFingerprint: null,
+    });
+  });
+});
+
+suite("tailscale host key", () => {
+  const ED25519 = publicLineFromSeed(Buffer.alloc(32, 7));
+  // Only the type name matters for selection; the rest of the blob is filler.
+  const RSA = `ssh-rsa ${Buffer.from("\0\0\0\x07ssh-rsa\0\0\0\x03\x01\0\x01", "latin1").toString("base64")}`;
+
+  test("fingerprints the ed25519 key ahead of the others", () => {
+    const fingerprint = tailscaleHostKeyFingerprint([RSA, ED25519]);
+    assert.match(fingerprint, /^SHA256:[A-Za-z0-9+/]{43}$/);
+    assert.equal(fingerprint, tailscaleHostKeyFingerprint([ED25519]));
+    assert.notEqual(fingerprint, tailscaleHostKeyFingerprint([RSA]));
+  });
+
+  test("is null when nothing parses", () => {
+    assert.equal(tailscaleHostKeyFingerprint(undefined), null);
+    assert.equal(tailscaleHostKeyFingerprint([]), null);
+    assert.equal(tailscaleHostKeyFingerprint(["ssh-ed25519 AAAA"]), null);
+    assert.equal(tailscaleHostKeyFingerprint(["not a key", 7]), null);
+    // A blob that does not name its own type (here: ed25519 label, rsa blob).
+    assert.equal(tailscaleHostKeyFingerprint([`ssh-ed25519 ${RSA.split(" ")[1]}`]), null);
+  });
+
+  test("detection reports it when status lists Self's keys", () => {
+    const { run } = fakeRun({
+      "status --json": JSON.stringify({
+        Self: { sshHostKeys: [ED25519], TailscaleIPs: ["100.73.39.6"] },
+      }),
+    });
+
+    assert.equal(
+      detectTailscaleSSH({ run }).hostKeyFingerprint,
+      tailscaleHostKeyFingerprint([ED25519]),
+    );
+  });
+});
+
+suite("tailnet candidates", () => {
+  test("orders IPv4, then MagicDNS, then IPv6, pre-checking all but IPv6", () => {
+    assert.deepEqual(
+      tailnetCandidates({
+        addresses: ["fd7a:115c:a1e0::1", "100.125.174.14"],
+        dnsName: "abhi-mac.taild99ff3.ts.net",
+      }),
+      [
+        { address: "100.125.174.14", family: "IPv4", interfaceName: "tailnet", preChecked: true },
+        {
+          address: "abhi-mac.taild99ff3.ts.net",
+          family: "MagicDNS",
+          interfaceName: "tailnet",
+          preChecked: true,
+        },
+        {
+          address: "fd7a:115c:a1e0::1",
+          family: "IPv6",
+          interfaceName: "tailnet",
+          preChecked: false,
+        },
+      ],
+    );
+  });
+
+  test("works without MagicDNS and drops duplicates and zone ids", () => {
+    assert.deepEqual(
+      tailnetCandidates({
+        addresses: ["100.1.2.3", "FD7A:115C:A1E0::1%utun4", "100.1.2.3"],
+        dnsName: null,
+      }).map(({ address }) => address),
+      ["100.1.2.3", "fd7a:115c:a1e0::1"],
+    );
+  });
+
+  test("is empty when tailscaled reported nothing", () => {
+    assert.deepEqual(tailnetCandidates({ addresses: [], dnsName: null }), []);
+    assert.deepEqual(tailnetCandidates(undefined), []);
   });
 });
 
@@ -171,6 +322,7 @@ suite("tailscale SSH conflict", () => {
     assert.match(warning, /100\.73\.39\.6/);
     assert.doesNotMatch(warning, /192\.168\.1\.10/);
     assert.match(warning, /ssh_port/);
+    assert.match(warning, /"auth": "tailscale"/);
   });
 
   // The case that made this address-exact: a hosting provider handed

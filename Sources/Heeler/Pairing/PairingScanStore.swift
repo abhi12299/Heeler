@@ -157,7 +157,7 @@ final class PairingScanStore {
         // answered, so preflight connects without a TOFU prompt.
         let host = Host(
             address: result.address, port: result.port, username: result.username,
-            authMethod: .deviceKey)
+            authMethod: result.authMethod)
         do {
             try catalog.add(host)
         } catch {
@@ -206,10 +206,25 @@ final class PairingScanStore {
                 step: .reach,
                 message: "Tailscale SSH answers port \(port) at "
                     + "\(addresses.joined(separator: ", ")), not OpenSSH, so this device "
-                    + "cannot be enrolled there. On the computer, set ssh_port in the pairing "
-                    + "plugin's pair.json to a port OpenSSH listens on, then generate a new "
-                    + "Pairing Code.",
+                    + "cannot be enrolled there. On the computer, set \"auth\": \"tailscale\" "
+                    + "in the pairing plugin's pair.json to pair over Tailscale SSH, or set "
+                    + "ssh_port to a port OpenSSH listens on, then generate a new Pairing Code.",
                 canRetry: false)
+        case .tailscaleSSHDenied(let message):
+            PairingFailure(
+                step: .authenticate,
+                message: "Tailscale SSH refused this device"
+                    + (message.map { ": \($0)." } ?? ".")
+                    + " Allow this device and user in the ssh section of your tailnet policy, "
+                    + "then try again with the same code.",
+                canRetry: true)
+        case .tailscaleSSHUnavailable:
+            PairingFailure(
+                step: .reach,
+                message: "Tailscale SSH did not answer at any of the Host's addresses. Check "
+                    + "that Tailscale is connected on this device and that Tailscale SSH is on "
+                    + "for the computer (tailscale set --ssh), then try again with the same code.",
+                canRetry: true)
         case .bootstrapRejected:
             PairingFailure(
                 step: .authenticate,
@@ -291,6 +306,7 @@ extension PairingCode {
     fileprivate var withoutBootstrap: PairingCode {
         PairingCode(
             addresses: addresses, port: port, username: username,
-            hostKeyFingerprint: hostKeyFingerprint, bootstrap: nil)
+            hostKeyFingerprint: hostKeyFingerprint, bootstrap: nil,
+            authorization: authorization)
     }
 }

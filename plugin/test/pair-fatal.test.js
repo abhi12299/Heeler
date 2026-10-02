@@ -5,6 +5,8 @@ import {
   MISSING_ADDRESS,
   MISSING_HOST_KEY,
   MISSING_STATE_DIR,
+  MISSING_TAILNET_ADDRESS,
+  TAILSCALE_SSH_OFF,
   fatalLines,
   pairingStartFailed,
 } from "../src/pair-fatal.js";
@@ -26,6 +28,16 @@ suite("startup copy", () => {
     assert.match(MISSING_HOST_KEY, /\/etc\/ssh/);
     assert.match(MISSING_HOST_KEY, /Remote Login/);
     assert.match(MISSING_HOST_KEY, /sudo ssh-keygen -A/);
+    assert.match(MISSING_HOST_KEY, /tailscale set --ssh/);
+  });
+
+  test("tailscale mode without Tailscale SSH says how to turn it on", () => {
+    assert.match(TAILSCALE_SSH_OFF, /"auth": "tailscale"/);
+    assert.match(TAILSCALE_SSH_OFF, /tailscale set --ssh/);
+  });
+
+  test("tailscale mode without tailnet addresses points at tailscale status", () => {
+    assert.match(MISSING_TAILNET_ADDRESS, /tailscale status/);
   });
 
   test("other startup failures keep their existing wording", () => {

@@ -1,5 +1,5 @@
 {
-  "description": "Shared Pairing Code v1 test vectors. Single source of truth for the envelope, consumed by both the Node plugin tests and the Swift app tests (ADR 0007). Codes were generated independently of both implementations. `decodeOnly: true` marks codes that must decode to `payload` but are not the canonical encoding of it; all other valid vectors must round-trip exactly through encode.",
+  "description": "Shared Pairing Code v1 test vectors. Single source of truth for the envelope, consumed by both the Node plugin tests and the Swift app tests (ADR 0007). Codes were generated independently of both implementations. `decodeOnly: true` marks codes that must decode to `payload` but are not the canonical encoding of it; all other valid vectors must round-trip exactly through encode. A valid `payload` omits `hostKeyFingerprint` and `auth` when the code carries no `fp`/`auth`; `auth: \"tailscale\"` codes carry no seed/exp and may omit the fingerprint.",
   "valid": [
     {
       "name": "config-only single LAN IPv4, default port",
@@ -42,6 +42,27 @@
         "port": 22,
         "username": "ada",
         "hostKeyFingerprint": "SHA256:6+jncNdibsG2cqvfoLApGrO8CvIwAEMzsB+IilOs8tg"
+      }
+    },
+    {
+      "name": "tailscale auth without host key fingerprint (tailnet IPv4, MagicDNS name, tailnet IPv6)",
+      "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxMDAuMTI1LjE3NC4xNCIsImFiaGktbWFjLnRhaWxkOTlmZjMudHMubmV0IiwiZmQ3YToxMTVjOmExZTA6OjEiXSwicG9ydCI6MjIsInVzZXIiOiJhZGEiLCJhdXRoIjoidGFpbHNjYWxlIn0",
+      "payload": {
+        "addresses": ["100.125.174.14", "abhi-mac.taild99ff3.ts.net", "fd7a:115c:a1e0::1"],
+        "port": 22,
+        "username": "ada",
+        "auth": "tailscale"
+      }
+    },
+    {
+      "name": "tailscale auth with host key fingerprint",
+      "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxMDAuMTAxLjEwMi4xMDMiXSwicG9ydCI6MjIsInVzZXIiOiJncmFjZSIsImZwIjoiU0hBMjU2OjYram5jTmRpYnNHMmNxdmZvTEFwR3JPOEN2SXdBRU16c0IrSWlsT3M4dGciLCJhdXRoIjoidGFpbHNjYWxlIn0",
+      "payload": {
+        "addresses": ["100.101.102.103"],
+        "port": 22,
+        "username": "grace",
+        "hostKeyFingerprint": "SHA256:6+jncNdibsG2cqvfoLApGrO8CvIwAEMzsB+IilOs8tg",
+        "auth": "tailscale"
       }
     }
   ],
@@ -129,6 +150,36 @@
     {
       "name": "expiry without seed",
       "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxOTIuMTY4LjEuNDIiXSwicG9ydCI6MjIsInVzZXIiOiJhZGEiLCJmcCI6IlNIQTI1Njo2K2puY05kaWJzRzJjcXZmb0xBcEdyTzhDdkl3QUVNenNCK0lpbE9zOHRnIiwiZXhwIjoxNzUzMzA1NjAwfQ",
+      "error": "bad_payload"
+    },
+    {
+      "name": "no auth and no fingerprint",
+      "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxOTIuMTY4LjEuNDIiXSwicG9ydCI6MjIsInVzZXIiOiJhZGEifQ",
+      "error": "bad_payload"
+    },
+    {
+      "name": "tailscale auth with bootstrap seed and expiry",
+      "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxMDAuMTAxLjEwMi4xMDMiXSwicG9ydCI6MjIsInVzZXIiOiJhZGEiLCJhdXRoIjoidGFpbHNjYWxlIiwic2VlZCI6IkFBRUNBd1FGQmdjSUNRb0xEQTBPRHhBUkVoTVVGUllYR0JrYUd4d2RIaDgiLCJleHAiOjE3NTMzMDU2MDB9",
+      "error": "bad_payload"
+    },
+    {
+      "name": "tailscale auth with expiry only",
+      "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxMDAuMTAxLjEwMi4xMDMiXSwicG9ydCI6MjIsInVzZXIiOiJhZGEiLCJhdXRoIjoidGFpbHNjYWxlIiwiZXhwIjoxNzUzMzA1NjAwfQ",
+      "error": "bad_payload"
+    },
+    {
+      "name": "tailscale auth with malformed fingerprint",
+      "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxMDAuMTAxLjEwMi4xMDMiXSwicG9ydCI6MjIsInVzZXIiOiJhZGEiLCJmcCI6Ik1ENTphYmMiLCJhdXRoIjoidGFpbHNjYWxlIn0",
+      "error": "bad_payload"
+    },
+    {
+      "name": "unknown auth value",
+      "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxMDAuMTAxLjEwMi4xMDMiXSwicG9ydCI6MjIsInVzZXIiOiJhZGEiLCJmcCI6IlNIQTI1Njo2K2puY05kaWJzRzJjcXZmb0xBcEdyTzhDdkl3QUVNenNCK0lpbE9zOHRnIiwiYXV0aCI6IndpcmVndWFyZCJ9",
+      "error": "bad_payload"
+    },
+    {
+      "name": "null auth",
+      "code": "HERDR-PAIR:1:eyJhZGRycyI6WyIxMDAuMTAxLjEwMi4xMDMiXSwicG9ydCI6MjIsInVzZXIiOiJhZGEiLCJhdXRoIjpudWxsfQ",
       "error": "bad_payload"
     }
   ]

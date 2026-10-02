@@ -18,8 +18,13 @@ function toVectorShape(payload) {
     addresses: payload.addresses,
     port: payload.port,
     username: payload.username,
-    hostKeyFingerprint: payload.hostKeyFingerprint,
   };
+  if (payload.hostKeyFingerprint !== undefined) {
+    shape.hostKeyFingerprint = payload.hostKeyFingerprint;
+  }
+  if (payload.auth !== undefined) {
+    shape.auth = payload.auth;
+  }
   if (payload.bootstrapSeed !== undefined) {
     shape.bootstrapSeed = payload.bootstrapSeed.toString("base64url");
   }
@@ -41,6 +46,7 @@ function fromVectorShape(payload) {
 suite("shared vectors", () => {
   test("vector file has cases", () => {
     assert.ok(vectors.valid.length >= 3);
+    assert.ok(vectors.valid.some((v) => v.payload.auth === "tailscale"));
     assert.ok(vectors.invalid.length >= 10);
   });
 
@@ -90,6 +96,40 @@ suite("encodePairingCode", () => {
       { ...base, bootstrapSeed: Buffer.alloc(31), expiresAt: 1753305600 },
       { ...base, bootstrapSeed: Buffer.alloc(32) },
       { ...base, expiresAt: 1753305600 },
+    ];
+    for (const bad of bads) {
+      assert.throws(
+        () => encodePairingCode(bad),
+        (error) => error instanceof PairingCodeError && error.code === "bad_payload",
+      );
+    }
+  });
+
+  test("round-trips a tailscale code with and without a fingerprint", () => {
+    const { hostKeyFingerprint, ...withoutFingerprint } = base;
+    for (const payload of [
+      { ...withoutFingerprint, auth: "tailscale" },
+      { ...base, auth: "tailscale" },
+    ]) {
+      assert.deepEqual(decodePairingCode(encodePairingCode(payload)), payload);
+    }
+  });
+
+  test("emits auth after fp and before seed", () => {
+    const code = encodePairingCode({ ...base, auth: "tailscale" });
+    const json = Buffer.from(code.split(":")[2], "base64url").toString("utf8");
+    assert.deepEqual(Object.keys(JSON.parse(json)), ["addrs", "port", "user", "fp", "auth"]);
+  });
+
+  test("rejects tailscale payloads that carry a Bootstrap Key or a bad auth", () => {
+    const { hostKeyFingerprint, ...withoutFingerprint } = base;
+    const bads = [
+      withoutFingerprint,
+      { ...withoutFingerprint, auth: "openssh" },
+      { ...base, auth: "" },
+      { ...withoutFingerprint, auth: "tailscale", bootstrapSeed: Buffer.alloc(32), expiresAt: 1 },
+      { ...withoutFingerprint, auth: "tailscale", expiresAt: 1753305600 },
+      { ...base, auth: "tailscale", hostKeyFingerprint: "MD5:abc" },
     ];
     for (const bad of bads) {
       assert.throws(

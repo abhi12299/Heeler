@@ -5,6 +5,12 @@
 // QR. The Bootstrap Key's restricted authorized_keys line lives exactly as
 // long as this popup and its 2-minute TTL, whichever ends first; Enrollment
 // itself happens in pair-accept.js, invoked by sshd as the forced command.
+//
+// Tailscale mode (pair.json "auth": "tailscale", or "auto" on a machine with
+// Tailscale SSH serving and no OpenSSH host key) skips all of that: the
+// tailnet identity and ACL authorize the phone, so the checklist offers this
+// node's tailnet addresses and the QR carries no Bootstrap Key, no expiry,
+// and nothing is written to authorized_keys.
 
 import os from "node:os";
 import { emitKeypressEvents } from "node:readline";
@@ -12,7 +18,7 @@ import QRCode from "qrcode";
 
 import { candidateAddresses } from "./addresses.js";
 import { readHostKeyFingerprint } from "./host-key.js";
-import { encodePairingCode } from "./envelope.js";
+import { encodePairingCode, PAIRING_AUTH_TAILSCALE } from "./envelope.js";
 import { commentOf, removeKeyLine, sweepExpiredBootstrapLines } from "./authorized-keys.js";
 import {
   beginPairing,
@@ -23,10 +29,13 @@ import {
   PAIRING_TTL_SECONDS,
 } from "./pairing-session.js";
 import { readPairingConfig } from "./pairing-config.js";
+import { decidePairingMode, needsTailscaleProbe } from "./pairing-mode.js";
 import {
   detectTailscaleSSH,
   mayBeTailscaleAddress,
+  tailnetCandidates,
   tailscaleSSHConflict,
+  TAILSCALE_SSH_PORT,
 } from "./tailscale-ssh.js";
 import {
   createSelection,
@@ -40,6 +49,8 @@ import {
   MISSING_ADDRESS,
   MISSING_HOST_KEY,
   MISSING_STATE_DIR,
+  MISSING_TAILNET_ADDRESS,
+  TAILSCALE_SSH_OFF,
   fatalLines,
   pairingStartFailed,
 } from "./pair-fatal.js";
@@ -60,6 +71,13 @@ const BOLD = "\u001b[1m";
 const DIM = "\u001b[2m";
 const REVERSE = "\u001b[7m";
 const RESET = "\u001b[0m";
+
+const TAILSCALE_NOT_SERVING = {
+  enabled: false,
+  addresses: [],
+  dnsName: null,
+  hostKeyFingerprint: null,
+};
 
 function paintFatal(message) {
   const lines = [...fatalLines(message)];
@@ -85,11 +103,18 @@ async function holdFatal(message) {
   process.exit(1);
 }
 
+function renderChecking() {
+  process.stdout.write(CLEAR + `${DIM}Checking Tailscale SSH...${RESET}\n`);
+}
+
 function renderChecklist(state, config, warning) {
+  const tailscaleMode = config.mode === "tailscale";
   const lines = [
-    `${BOLD}Pair a Heeler device${RESET}`,
+    `${BOLD}Pair a Heeler device${tailscaleMode ? " over Tailscale SSH" : ""}${RESET}`,
     "",
-    "Select the addresses the phone can reach this machine on:",
+    tailscaleMode
+      ? "Select the tailnet addresses the phone can reach this machine on:"
+      : "Select the addresses the phone can reach this machine on:",
     "",
   ];
   state.items.forEach((item, index) => {
@@ -99,15 +124,36 @@ function renderChecklist(state, config, warning) {
     lines.push(` ${cursor} ${box} ${label}${RESET}`);
   });
   lines.push("");
-  lines.push(`SSH port ${BOLD}${config.sshPort}${RESET} ${DIM}(pair.json ssh_port)${RESET}`);
-  // A rejected override stays on screen next to the port it failed to change:
-  // the transient warning below is spent on checklist mistakes instead.
-  if (config.warning) {
-    lines.push(`${BOLD}${config.warning} Advertising ${config.sshPort}.${RESET}`);
+  if (tailscaleMode) {
+    // Tailscale SSH only ever answers port 22, so ssh_port has nothing to say
+    // here; name an override rather than drop it silently.
+    lines.push(`SSH port ${BOLD}${TAILSCALE_SSH_PORT}${RESET} ${DIM}(Tailscale SSH)${RESET}`);
+    if (config.warning) {
+      lines.push(`${BOLD}${config.warning}${RESET}`);
+    } else if (config.sshPort !== TAILSCALE_SSH_PORT) {
+      lines.push(
+        `${DIM}pair.json ssh_port ${config.sshPort} ignored: Tailscale SSH answers port ` +
+          `${TAILSCALE_SSH_PORT} only.${RESET}`,
+      );
+    }
+    lines.push(
+      `${DIM}The tailnet ACL authorizes the phone; nothing is enrolled on this machine.${RESET}`,
+    );
+  } else {
+    lines.push(`SSH port ${BOLD}${config.sshPort}${RESET} ${DIM}(pair.json ssh_port)${RESET}`);
+    // A rejected override stays on screen next to the port it failed to
+    // change: the transient warning below is spent on checklist mistakes
+    // instead.
+    if (config.warning) {
+      lines.push(`${BOLD}${config.warning} Advertising ${config.sshPort}.${RESET}`);
+    }
+  }
+  if (config.authWarning) {
+    lines.push(`${BOLD}${config.authWarning}${RESET}`);
   }
   // Follows the selection: checking a tailnet address raises it, unchecking
-  // it again takes it away.
-  const conflict = tailscaleSSHConflict({
+  // it again takes it away. Tailscale mode is the answer to it, not a case.
+  const conflict = tailscaleMode ? null : tailscaleSSHConflict({
     addresses: selectedAddresses(state),
     sshPort: config.sshPort,
     tailscale: config.tailscale,
@@ -128,7 +174,6 @@ function renderChecklist(state, config, warning) {
 async function renderPairingCode(payload, { copied = false, printedCode = null } = {}) {
   const code = encodePairingCode(payload);
   const qr = await QRCode.toString(code, { type: "terminal", small: true });
-  const expires = new Date(payload.expiresAt * 1000).toLocaleTimeString();
   // QR first, starting at row 1. Writing more lines than the pane has rows
   // scrolls the earliest ones off the top, and with a header above the QR
   // that meant the QR's top edge vanished into scrollback. Clamp to the
@@ -136,14 +181,27 @@ async function renderPairingCode(payload, { copied = false, printedCode = null }
   const hint = copied
     ? `${BOLD}copied${RESET} ${DIM}-- any other key close${RESET}`
     : `${BOLD}Scan with Heeler${RESET} ${DIM}-- c: copy pairing code, any other key close${RESET}`;
-  const lines = [
-    ...qr.trimEnd().split("\n"),
-    hint,
-    `${BOLD}${payload.username}${RESET} on port ${BOLD}${payload.port}${RESET}`,
-    `Host key ${payload.hostKeyFingerprint}`,
-    `Addresses: ${payload.addresses.join(", ")}`,
-    `Code valid until ${BOLD}${expires}${RESET}, single use`,
-  ];
+  const details =
+    payload.auth === PAIRING_AUTH_TAILSCALE
+      ? [
+          `${BOLD}${payload.username}${RESET} on port ${BOLD}${payload.port}${RESET}, ` +
+            `${BOLD}Tailscale SSH mode${RESET}`,
+          payload.hostKeyFingerprint !== undefined
+            ? `Host key ${payload.hostKeyFingerprint}`
+            : "Host key: Heeler trusts tailscaled's key on first use",
+          `Addresses: ${payload.addresses.join(", ")}`,
+          "The tailnet ACL authorizes the phone; nothing is enrolled on this machine.",
+          "If the tailnet policy uses check, Heeler shows a Tailscale login link to approve.",
+          "This code contains no secret and does not expire.",
+        ]
+      : [
+          `${BOLD}${payload.username}${RESET} on port ${BOLD}${payload.port}${RESET}`,
+          `Host key ${payload.hostKeyFingerprint}`,
+          `Addresses: ${payload.addresses.join(", ")}`,
+          `Code valid until ${BOLD}${new Date(payload.expiresAt * 1000).toLocaleTimeString()}` +
+            `${RESET}, single use`,
+        ];
+  const lines = [...qr.trimEnd().split("\n"), hint, ...details];
   const rows = process.stdout.rows;
   const visible = Number.isInteger(rows) && rows > 0 ? lines.slice(0, rows) : lines;
   process.stdout.write(CLEAR + visible.join("\n"));
@@ -236,33 +294,62 @@ async function main() {
   // Re-read on every checklist repaint. The warnings below tell the operator
   // to edit pair.json, so an edit made in another pane has to take effect
   // here without reopening the popup -- reading one small file is cheap.
+  // The mode is decided once, below; a pair.json `auth` edit takes effect the
+  // next time the popup opens.
   let checklistConfig = {
     ...readPairingConfig(configDir),
-    tailscale: { enabled: false, addresses: [] },
+    tailscale: TAILSCALE_NOT_SERVING,
+    mode: "openssh",
   };
   function currentConfig() {
     checklistConfig = {
       ...readPairingConfig(configDir),
       tailscale: checklistConfig.tailscale,
+      mode: checklistConfig.mode,
     };
     return checklistConfig;
   }
 
   const hostKey = readHostKeyFingerprint();
-  if (hostKey === null) {
+  const hostKeyAvailable = hostKey !== null;
+  const { auth } = checklistConfig;
+  // Only "tailscale", or "auto" without an OpenSSH host key, asks Tailscale
+  // before the first screen; the probe's own timeouts bound the wait.
+  if (needsTailscaleProbe({ auth, hostKeyAvailable })) {
+    renderChecking();
+    checklistConfig.tailscale = detectTailscaleSSH();
+  }
+  const mode = decidePairingMode({
+    auth,
+    hostKeyAvailable,
+    tailscaleServing: checklistConfig.tailscale.enabled,
+  });
+  if (mode === "missing_host_key") {
     await holdFatal(MISSING_HOST_KEY);
     return;
   }
-  const candidates = candidateAddresses();
+  if (mode === "tailscale_ssh_off") {
+    await holdFatal(TAILSCALE_SSH_OFF);
+    return;
+  }
+  checklistConfig.mode = mode;
+  const tailscaleMode = mode === "tailscale";
+
+  const candidates = tailscaleMode
+    ? tailnetCandidates(checklistConfig.tailscale)
+    : candidateAddresses();
   if (candidates.length === 0) {
-    await holdFatal(MISSING_ADDRESS);
+    await holdFatal(tailscaleMode ? MISSING_TAILNET_ADDRESS : MISSING_ADDRESS);
     return;
   }
 
   // Startup sweep: crashed or killed ceremonies must leave no residue —
-  // neither authorized_keys lines nor pending/enrolled state files.
-  await sweepExpiredBootstrapLines(home);
-  sweepExpiredStateFiles(stateDir);
+  // neither authorized_keys lines nor pending/enrolled state files. Tailscale
+  // mode never touches either.
+  if (!tailscaleMode) {
+    await sweepExpiredBootstrapLines(home);
+    sweepExpiredStateFiles(stateDir);
+  }
 
   let state = createSelection(candidates);
   let phase = "select";
@@ -388,7 +475,28 @@ async function main() {
     renderRevoked(enrolled);
   }
 
+  // Tailscale mode: no Bootstrap Key, no TTL, no Enrollment to wait for.
+  // The code only says where to connect and as whom; the tailnet ACL decides
+  // whether that is allowed.
+  async function showTailscaleCode() {
+    lastPayload = {
+      addresses: confirmedAddresses,
+      port: TAILSCALE_SSH_PORT,
+      username: os.userInfo().username,
+      auth: PAIRING_AUTH_TAILSCALE,
+    };
+    const { hostKeyFingerprint } = checklistConfig.tailscale;
+    if (hostKeyFingerprint) {
+      lastPayload.hostKeyFingerprint = hostKeyFingerprint;
+    }
+    displayedCode = await renderPairingCode(lastPayload);
+  }
+
   async function startCeremony() {
+    if (tailscaleMode) {
+      await showTailscaleCode();
+      return;
+    }
     session = await beginPairing({ home, stateDir });
     const { pairingId } = session;
     expiryTimer = setTimeout(() => {
@@ -456,7 +564,10 @@ async function main() {
   // Probed after that first paint, and only where a tailnet address is on
   // offer: spawnSync blocks, and a wedged tailscaled must not hold the
   // checklist off the screen.
-  if (candidates.some((candidate) => mayBeTailscaleAddress(candidate.address))) {
+  if (
+    !tailscaleMode &&
+    candidates.some((candidate) => mayBeTailscaleAddress(candidate.address))
+  ) {
     checklistConfig.tailscale = detectTailscaleSSH();
     if (checklistConfig.tailscale.enabled) {
       renderChecklist(state, currentConfig());

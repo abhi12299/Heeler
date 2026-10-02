@@ -10,6 +10,23 @@ export const MISSING_HOST_KEY = [
   "Enable Remote Login (System Settings > General > Sharing), or run:",
   "  sudo ssh-keygen -A",
   "Then invoke pairing again.",
+  "",
+  "Or pair over Tailscale SSH instead: run `tailscale set --ssh`",
+  '(with pair.json "auth" unset, "auto", or "tailscale").',
+].join("\n");
+
+export const TAILSCALE_SSH_OFF = [
+  'pair.json sets "auth": "tailscale", but Tailscale SSH is not serving here.',
+  "",
+  "Turn it on, then invoke pairing again:",
+  "  tailscale set --ssh",
+  "",
+  'Or remove "auth" from pair.json to pair through OpenSSH.',
+].join("\n");
+
+export const MISSING_TAILNET_ADDRESS = [
+  "Tailscale SSH is serving, but tailscale status reported no tailnet",
+  "address for this machine. Run `tailscale status` and retry once it is up.",
 ].join("\n");
 
 export const MISSING_ADDRESS =

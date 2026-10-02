@@ -26,6 +26,9 @@ struct SSHPairingConnector: PairingConnector {
         deviceKey: DeviceKey,
         onStep: @escaping @Sendable (PairingStep) -> Void
     ) async throws -> PairingResult {
+        if code.authorization == .tailscale {
+            return try await pairOverTailscale(code: code, onStep: onStep)
+        }
         guard let bootstrap = code.bootstrap else {
             onStep(.reach)
             let reached = try await reach(
@@ -176,6 +179,96 @@ struct SSHPairingConnector: PairingConnector {
         let softwareVersion = serverIdentification.dropFirst(prefix.count)
             .prefix { $0 != " " }
         return softwareVersion.hasPrefix("Tailscale")
+    }
+
+    // MARK: Tailscale SSH
+
+    /// A Tailscale SSH code: tailnet identity and ACL authorize this device,
+    /// so there is nothing to enroll. Reaching tailscaled and passing its
+    /// `none` authentication (including any `check` login, surfaced through
+    /// `TailscaleCheckPrompts`) is the whole ceremony. Only a server that
+    /// identifies as Tailscale SSH is accepted, and the code's pin, when it
+    /// carries one, still applies.
+    private func pairOverTailscale(
+        code: PairingCode,
+        onStep: @escaping @Sendable (PairingStep) -> Void
+    ) async throws -> PairingResult {
+        onStep(.reach)
+        var attempts: [String] = []
+        for address in code.addresses {
+            try Task.checkCancellation()
+            let connection: SSHConnection
+            do {
+                connection = try await SSHConnection.connect(
+                    to: try Self.endpoint(address: address, port: code.port),
+                    timeout: perAddressTimeout)
+            } catch SSHError.cancelled {
+                throw CancellationError()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                attempts.append("\(address): \(error)")
+                continue
+            }
+
+            guard identifiesTailscaleSSH(connection.serverIdentification) else {
+                await Self.close(connection)
+                attempts.append("\(address): answered by another SSH server")
+                continue
+            }
+            let presented = HostKeyFingerprint(publicKeyBlob: connection.hostKey.key)
+            if let pinned = code.hostKeyFingerprint, presented != pinned {
+                await Self.close(connection)
+                attempts.append(
+                    "\(address): presented \(presented.displayString), not the pinned host key")
+                continue
+            }
+
+            onStep(.authenticate)
+            let attempt = UUID()
+            let banners = TailscaleBannerLog()
+            do {
+                defer {
+                    Task { @MainActor in TailscaleCheckPrompts.shared.finish(attempt) }
+                }
+                try await connection.authenticateNone(
+                    username: code.username,
+                    timeout: TailscaleSSH.authenticationBudget
+                ) { banner in
+                    banners.append(banner)
+                    guard let url = TailscaleSSH.loginURL(inBanner: banner) else { return }
+                    Task { @MainActor in
+                        TailscaleCheckPrompts.shared.present(
+                            .init(id: attempt, host: address, url: url))
+                    }
+                }
+            } catch SSHError.authenticationFailed {
+                await Self.close(connection)
+                throw PairingCeremonyError.tailscaleSSHDenied(
+                    message: banners.last.map(TailscaleSSH.denialMessage(fromBanner:)))
+            } catch SSHError.cancelled {
+                await Self.close(connection)
+                throw CancellationError()
+            } catch is CancellationError {
+                await Self.close(connection)
+                throw CancellationError()
+            } catch {
+                await Self.close(connection)
+                attempts.append("\(address): \(error)")
+                continue
+            }
+
+            onStep(.verify)
+            await Self.close(connection)
+            return PairingResult(
+                address: address,
+                port: code.port,
+                username: code.username,
+                hostKeyFingerprint: presented,
+                authMethod: .tailscale)
+        }
+        throw PairingCeremonyError.tailscaleSSHUnavailable(
+            detail: attempts.joined(separator: "; "))
     }
 
     // MARK: Enroll

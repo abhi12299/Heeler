@@ -26,7 +26,8 @@ gates. See [Sidebar layout snapshot (v1)](#sidebar-layout-snapshot-v1).
 
 - Node.js >= 20 on `PATH`
 - herdr >= 0.7.5
-- An OpenSSH server on this machine (the code pins its host key fingerprint)
+- An OpenSSH server on this machine (the code pins its host key fingerprint),
+  or Tailscale SSH (see [Tailscale SSH mode](#tailscale-ssh-mode))
 
 ## Install
 
@@ -115,7 +116,8 @@ herdr plugin action invoke heeler.pair
 
 | Field      | Type    | Meaning |
 | ---------- | ------- | ------- |
-| `ssh_port` | integer | SSH port advertised in the Pairing Code, `1..65535`. Default 22. An absent `pair.json` means 22; a file that cannot be read or parsed, or an `ssh_port` outside that range, also falls back to 22 and says so in the checklist. |
+| `ssh_port` | integer | SSH port advertised in the Pairing Code, `1..65535`. Default 22. An absent `pair.json` means 22; a file that cannot be read or parsed, or an `ssh_port` outside that range, also falls back to 22 and says so in the checklist. Ignored in Tailscale SSH mode, which is always 22. |
+| `auth`     | string  | `"auto"` (default), `"openssh"`, or `"tailscale"`: which pairing mode the popup runs. `"auto"` pairs over [Tailscale SSH](#tailscale-ssh-mode) only when it is serving *and* `/etc/ssh` has no host key; otherwise it runs the OpenSSH ceremony below. Any other value falls back to `"auto"` and says so in the checklist. Read once when the popup opens. |
 
 The Pairing Code pins the host key found under `/etc/ssh` (`src/host-key.js`),
 so the alternate port must be served by **the same sshd** — another `Port`
@@ -126,10 +128,10 @@ without reopening the popup.
 
 The checklist and QR screen both show the advertised port, and the checklist
 names an override it could not honor rather than quietly handing back 22 —
-the port a Tailscale-SSH Host is trying to get away from. Pairing still
-requires a real OpenSSH listener (host key under `/etc/ssh`,
-`authorized_keys` forced commands); Tailscale SSH alone cannot run the
-ceremony.
+the port a Tailscale-SSH Host is trying to get away from. The OpenSSH
+ceremony needs a real OpenSSH listener (host key under `/etc/ssh`,
+`authorized_keys` forced commands); Tailscale SSH cannot run it, which is
+what [Tailscale SSH mode](#tailscale-ssh-mode) is for.
 
 On a machine holding an address that *might* be a tailnet one, the popup asks
 Tailscale once, after the first paint, whether it is serving SSH:
@@ -138,6 +140,8 @@ Tailscale once, after the first paint, whether it is serving SSH:
 `status --json` reports as this node's own (`Self.TailscaleIPs`) is checked
 while the code still advertises port 22, the checklist says so before the QR
 appears — tailscaled would answer that port, and Enrollment cannot run there.
+The warning offers both ways out: move `ssh_port` to OpenSSH, or set
+`"auth": "tailscale"` and reopen the popup to pair over Tailscale SSH instead.
 
 The warning matches those addresses exactly rather than the `100.64.0.0/10`
 range, which is the whole carrier-grade NAT block: measured on a VPS whose
@@ -150,19 +154,53 @@ in both directions, `sshHostKeys` was absent from `Self` and from every peer
 either way, and `Self.CapMap` is no substitute — its `cap/ssh` and
 `ssh-behavior-v1` entries are ACL grants that survive `--ssh=false`.
 
-Every probe only ever answers yes. No `tailscale` on `PATH` (nor in the macOS
-app bundle), a logged-out tailscaled, an output shape that changed, or a
+Every probe only ever answers yes. No `tailscale` on `PATH` (nor under
+`/opt/homebrew/bin`, `/usr/local/bin`, or the macOS app bundle — herdr may
+start the popup without the shell's `PATH`), a logged-out tailscaled, an output shape that changed, or a
 readable `RunSSH` with unreadable addresses all read as "not serving" and
 warn about nothing: a false alarm on every pairing would cost more than this
 warning saves.
 
 A missed warning is caught on the phone instead. tailscaled identifies itself
-as `SSH-2.0-Tailscale`, and the app skips any candidate that does before
-comparing its host key or authenticating, then names Tailscale SSH and
-`ssh_port` rather than reporting the Host unreachable. Stopping before
-authentication matters: under a `check` policy tailscaled holds
-authentication open for a browser login, and under `accept` it would run the
-requested command as the user.
+as `SSH-2.0-Tailscale`, and for an OpenSSH-mode code the app skips any
+candidate that does before comparing its host key or authenticating, then
+names Tailscale SSH and `ssh_port` rather than reporting the Host
+unreachable. Stopping before authentication matters: under a `check` policy
+tailscaled holds authentication open for a browser login, and under `accept`
+it would run the requested command as the user.
+
+### Tailscale SSH mode
+
+With Tailscale SSH serving, the tailnet already decides who may log in:
+tailscaled authenticates the peer by its node identity over WireGuard and
+checks the tailnet ACL's `ssh` rules, and it never reads `authorized_keys`.
+Tailscale mode leans on that instead of enrolling anything:
+
+- No Bootstrap Key, no `authorized_keys` edit, no TTL, no Enrollment or
+  revoke screen. The code carries only addresses, port 22, the username, and
+  `auth: "tailscale"` — no secret, and it does not expire.
+- The checklist offers this node's own tailnet addresses from
+  `tailscale status --json`: IPv4 first, then the MagicDNS name (`DNSName`
+  without its trailing dot), then IPv6. IPv4 and MagicDNS are pre-checked.
+- The app connects with SSH `none` authentication. Under an `accept` policy
+  the ACL is the whole decision; under `check` tailscaled holds the login
+  open and sends a Tailscale login URL as an auth banner, which Heeler shows
+  so the user can approve it in a browser.
+- tailscaled's host keys sit root-only under its state directory, and
+  `status --json` has not been seen to list `sshHostKeys` for `Self`, so the
+  code normally carries no `fp` and the app trusts tailscaled's key on first
+  use. That first connection is already inside the WireGuard tunnel to the
+  node `tailscale status` names. If `sshHostKeys` ever does list this node's
+  keys, the plugin pins the ed25519 one.
+- Revoking a device is a tailnet change (remove the device or tighten the
+  ACL), not a line in `authorized_keys`.
+
+`"auth": "tailscale"` on a machine where Tailscale SSH is not serving holds
+the popup on a screen saying so (`tailscale set --ssh`). `"auto"` probes
+Tailscale before the first screen only when `/etc/ssh` has no host key, so a
+machine with OpenSSH keeps the ceremony above and its conflict warning. On
+macOS with Remote Login never enabled, `"auto"` therefore pairs over
+Tailscale SSH with no `pair.json` at all.
 
 ## Pairing Code envelope (v1)
 
@@ -186,17 +224,20 @@ HERDR-PAIR:<version>:<base64url(JSON, no padding)>
 | `addrs`  | string[]| yes      | Candidate addresses in the order the app should try them. Non-empty; each entry a non-empty string without whitespace. IPv6 literals carry no brackets and no zone id. |
 | `port`   | integer | yes      | SSH port, `1..65535`. |
 | `user`   | string  | yes      | SSH username. Non-empty, no whitespace. |
-| `fp`     | string  | yes      | Host key fingerprint exactly as OpenSSH prints it: `SHA256:` + 43 chars of unpadded standard base64. The app pins this instead of showing a TOFU prompt. |
+| `fp`     | string  | yes, unless `auth` is `"tailscale"` | Host key fingerprint exactly as OpenSSH prints it: `SHA256:` + 43 chars of unpadded standard base64. The app pins this instead of showing a TOFU prompt. |
+| `auth`   | string  | no       | Absent for OpenSSH pairing. `"tailscale"`: a [Tailscale SSH mode](#tailscale-ssh-mode) code — `seed` and `exp` must be absent, and `fp` is optional (validated as above when present). Any other value is rejected. |
 | `seed`   | string  | no       | Raw 32-byte Ed25519 seed of the Bootstrap Key, unpadded base64url. Present together with `exp` or not at all. |
 | `exp`    | integer | no       | Unix-seconds expiry of the Bootstrap Key. Present together with `seed` or not at all. |
 
 A payload violating these rules is rejected (`bad_payload`). A code without
-`seed`/`exp` is a config-only Pairing Code: same ceremony minus the bootstrap
-connection.
+`seed`/`exp` and without `auth` is a config-only Pairing Code: same ceremony
+minus the bootstrap connection. `auth` is additive within v1: a decoder that
+predates it ignores the field and rejects a code without `fp`.
 
 ### Canonical encoding
 
-Encoders emit the keys in the order of the table above with no JSON
+Encoders emit the keys in the order of the table above (`addrs`, `port`,
+`user`, `fp`, `auth`, `seed`, `exp`, omitting absent ones) with no JSON
 whitespace, so a given payload has exactly one canonical code. Decoders do not
 depend on key order.
 
@@ -268,6 +309,8 @@ Valid vectors must decode to the given payload and (unless `decodeOnly`)
 re-encode to the exact code; invalid vectors must fail with the given error
 code (`bad_prefix`, `unsupported_version`, `bad_encoding`, `bad_payload` —
 these map to the "parse" step of the pairing failure taxonomy).
+A valid vector's `payload` carries `auth` only when the code does, and omits
+`hostKeyFingerprint` when the code has no `fp`.
 
 ## Notification envelope (v1)
 

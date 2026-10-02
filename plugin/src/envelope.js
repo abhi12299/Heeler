@@ -13,6 +13,10 @@ const BOOTSTRAP_SEED_BYTES = 32;
 // OpenSSH fingerprint: "SHA256:" + unpadded standard base64 of a 32-byte digest.
 const FINGERPRINT_PATTERN = /^SHA256:[A-Za-z0-9+/]{43}$/;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+// `auth` values a v1 code may carry. Absent means OpenSSH pairing with a
+// pinned host key; "tailscale" means the tailnet ACL authorizes the phone, so
+// there is no Bootstrap Key and the host key fingerprint becomes optional.
+export const PAIRING_AUTH_TAILSCALE = "tailscale";
 
 export class PairingCodeError extends Error {
   /**
@@ -37,12 +41,16 @@ function fail(code, message) {
  * @param {string[]} payload.addresses candidate addresses in try-order
  * @param {number} payload.port SSH port
  * @param {string} payload.username SSH username
- * @param {string} payload.hostKeyFingerprint OpenSSH SHA256 host key fingerprint
+ * @param {string} [payload.hostKeyFingerprint] OpenSSH SHA256 host key
+ *   fingerprint; required unless `auth` is "tailscale"
+ * @param {"tailscale"} [payload.auth] how the phone is authorized; absent
+ *   for OpenSSH pairing
  * @param {Buffer} [payload.bootstrapSeed] raw Ed25519 seed of the Bootstrap Key
  * @param {number} [payload.expiresAt] unix-seconds expiry of the Bootstrap Key
  */
 function validatePayload(payload) {
-  const { addresses, port, username, hostKeyFingerprint, bootstrapSeed, expiresAt } = payload;
+  const { addresses, port, username, hostKeyFingerprint, auth, bootstrapSeed, expiresAt } =
+    payload;
 
   if (!Array.isArray(addresses) || addresses.length === 0) {
     fail("bad_payload", "addresses must be a non-empty array");
@@ -58,8 +66,20 @@ function validatePayload(payload) {
   if (typeof username !== "string" || username.length === 0 || /\s/.test(username)) {
     fail("bad_payload", "username must be a non-empty string without whitespace");
   }
-  if (typeof hostKeyFingerprint !== "string" || !FINGERPRINT_PATTERN.test(hostKeyFingerprint)) {
+  if (auth !== undefined && auth !== PAIRING_AUTH_TAILSCALE) {
+    fail("bad_payload", `unsupported auth ${JSON.stringify(auth)}`);
+  }
+  const tailscale = auth === PAIRING_AUTH_TAILSCALE;
+  // Tailscale SSH answers with tailscaled's own host key, which the plugin
+  // usually cannot read; the app trusts it on first use instead of pinning.
+  if (
+    !(tailscale && hostKeyFingerprint === undefined) &&
+    (typeof hostKeyFingerprint !== "string" || !FINGERPRINT_PATTERN.test(hostKeyFingerprint))
+  ) {
     fail("bad_payload", "hostKeyFingerprint must be an OpenSSH SHA256 fingerprint");
+  }
+  if (tailscale && (bootstrapSeed !== undefined || expiresAt !== undefined)) {
+    fail("bad_payload", "a tailscale Pairing Code carries no Bootstrap Key");
   }
   if ((bootstrapSeed === undefined) !== (expiresAt === undefined)) {
     fail("bad_payload", "bootstrapSeed and expiresAt must be present together");
@@ -84,8 +104,13 @@ export function encodePairingCode(payload) {
     addrs: payload.addresses,
     port: payload.port,
     user: payload.username,
-    fp: payload.hostKeyFingerprint,
   };
+  if (payload.hostKeyFingerprint !== undefined) {
+    wire.fp = payload.hostKeyFingerprint;
+  }
+  if (payload.auth !== undefined) {
+    wire.auth = payload.auth;
+  }
   if (payload.bootstrapSeed !== undefined) {
     wire.seed = payload.bootstrapSeed.toString("base64url");
     wire.exp = payload.expiresAt;
@@ -105,7 +130,8 @@ function decodeBase64UrlStrict(text, what, errorCode) {
  * Decode and validate a scanned Pairing Code string.
  *
  * @returns {{addresses: string[], port: number, username: string,
- *            hostKeyFingerprint: string, bootstrapSeed?: Buffer, expiresAt?: number}}
+ *            hostKeyFingerprint?: string, auth?: "tailscale",
+ *            bootstrapSeed?: Buffer, expiresAt?: number}}
  * @throws {PairingCodeError} with a step-taxonomy code:
  *   bad_prefix | unsupported_version | bad_encoding | bad_payload
  */
@@ -138,8 +164,13 @@ export function decodePairingCode(code) {
     addresses: wire.addrs,
     port: wire.port,
     username: wire.user,
-    hostKeyFingerprint: wire.fp,
   };
+  if (wire.fp !== undefined) {
+    payload.hostKeyFingerprint = wire.fp;
+  }
+  if (wire.auth !== undefined) {
+    payload.auth = wire.auth;
+  }
   if (wire.seed !== undefined) {
     if (typeof wire.seed !== "string") {
       fail("bad_payload", "seed must be a base64url string");
