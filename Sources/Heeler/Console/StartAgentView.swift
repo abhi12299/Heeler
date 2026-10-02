@@ -31,6 +31,7 @@ struct StartAgentView: View {
                             .compactMap { $0.agent.name })
                 },
                 discoverAgentKinds: { try await console.availableAgentKinds(on: $0) },
+                customAgents: { CustomAgentStore.shared.agents },
                 remoteHome: { try await console.remoteHomeDirectory(on: $0) },
                 start: { params, destination, hostID in
                     switch destination {
@@ -170,11 +171,25 @@ struct StartAgentView: View {
                             Task { await store.discoverAgents() }
                         }
                     case .loaded:
-                        Picker("Agent", selection: $store.selectedAgentKind) {
+                        Picker("Agent", selection: $store.agentChoice) {
                             ForEach(store.availableAgentKinds) { kind in
                                 Text("\(kind.displayName) (\(kind.executable))")
-                                    .tag(SupportedAgentKind?.some(kind))
+                                    .tag(StartAgentStore.AgentChoice?.some(.builtIn(kind)))
                             }
+                            if !store.availableCustomAgents.isEmpty {
+                                Divider()
+                                ForEach(store.availableCustomAgents) { agent in
+                                    Text(
+                                        "\(agent.trimmedName) (\(agent.supportedKind?.displayName ?? agent.kind))"
+                                    )
+                                    .tag(StartAgentStore.AgentChoice?.some(.custom(agent.id)))
+                                }
+                            }
+                        }
+                        NavigationLink {
+                            CustomAgentListView()
+                        } label: {
+                            Label("Custom Agents", systemImage: "slider.horizontal.3")
                         }
                         Button("Detect Again", systemImage: "arrow.clockwise") {
                             Task { await store.discoverAgents() }
@@ -189,7 +204,13 @@ struct StartAgentView: View {
                 } header: {
                     Text("Agent")
                 } footer: {
-                    Text("Agents installed and launchable from this Host's PATH.")
+                    if let custom = store.selectedCustomAgent {
+                        Text("Runs \(Text(CustomAgentPreview.commandLine(for: custom)).monospaced())")
+                    } else {
+                        Text(
+                            "Agents installed and launchable from this Host's PATH, then your Custom Agents."
+                        )
+                    }
                 }
 
                 Section {
@@ -228,6 +249,8 @@ struct StartAgentView: View {
                     if let message = store.argumentErrorMessage {
                         Text(message)
                             .foregroundStyle(.red)
+                    } else if let custom = store.selectedCustomAgent {
+                        Text("Added after \(custom.trimmedName)'s own arguments.")
                     } else {
                         Text(
                             "Quotes and backslash escapes are supported.\ne.g. \(Text(#"--model "gpt 5" --continue"#).monospaced())"

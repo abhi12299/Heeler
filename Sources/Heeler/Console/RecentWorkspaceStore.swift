@@ -25,6 +25,35 @@ struct RecentWorkspaceStore {
         defaults.set(updated, forKey: Self.defaultsKey)
     }
 
+    /// The Agent picker's last launched choice on a Host, stored as
+    /// `kind:<raw>` or `custom:<uuid>`, so the form reopens on it.
+    func agentChoice(for hostID: Host.ID) -> StartAgentStore.AgentChoice? {
+        guard
+            let stored = (defaults.dictionary(forKey: Self.agentChoiceKey) as? [String: String])?[
+                hostID.uuidString]
+        else { return nil }
+        if stored.hasPrefix("kind:") {
+            return SupportedAgentKind(rawValue: String(stored.dropFirst("kind:".count)))
+                .map(StartAgentStore.AgentChoice.builtIn)
+        }
+        if stored.hasPrefix("custom:") {
+            return UUID(uuidString: String(stored.dropFirst("custom:".count)))
+                .map(StartAgentStore.AgentChoice.custom)
+        }
+        return nil
+    }
+
+    func rememberAgentChoice(_ choice: StartAgentStore.AgentChoice, for hostID: Host.ID) {
+        var updated = defaults.dictionary(forKey: Self.agentChoiceKey) as? [String: String] ?? [:]
+        switch choice {
+        case .builtIn(let kind): updated[hostID.uuidString] = "kind:\(kind.rawValue)"
+        case .custom(let id): updated[hostID.uuidString] = "custom:\(id.uuidString)"
+        }
+        defaults.set(updated, forKey: Self.agentChoiceKey)
+    }
+
+    private static let agentChoiceKey = "recent-agent-choice-by-host"
+
     /// Entries for Hosts that no longer exist are harmless (a few bytes each,
     /// never read), so nothing prunes them.
     private var byHost: [String: String] {

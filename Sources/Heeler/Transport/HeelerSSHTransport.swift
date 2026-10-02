@@ -880,6 +880,7 @@ actor HeelerSSHTransport: Transport {
             method: "tab.create",
             params: TabCreateParams(
                 cwd: launch.cwd,
+                env: launch.environmentParameter,
                 focus: false,
                 label: launch.resolvedTabLabel,
                 workspaceID: launch.workspaceID),
@@ -909,6 +910,9 @@ actor HeelerSSHTransport: Transport {
                 workspaceID: launch.workspaceID),
             decoding: WorktreeCreatedResponse.self)
         do {
+            if launch.environmentParameter != nil {
+                return try await startAgentInEnvironmentTab(launch, worktree: created)
+            }
             let response = try await startAgentAwaitingShell(
                 launch,
                 paneID: created.rootPane.paneID)
@@ -933,6 +937,7 @@ actor HeelerSSHTransport: Transport {
             method: "workspace.create",
             params: WorkspaceCreateParams(
                 cwd: workspace.directory,
+                env: launch.environmentParameter,
                 focus: false,
                 label: workspace.label),
             decoding: WorkspaceCreatedResponse.self)
@@ -974,6 +979,32 @@ actor HeelerSSHTransport: Transport {
             decoding: WorktreeRemovedResponse.self,
             beforeDispatch: { try await authorize(removal) },
             onDispatched: { await onDispatched(removal) })
+    }
+
+    /// `worktree.create` takes no `env`, and its root pane's shell is already
+    /// running without it. An environment-carrying launch therefore opens its
+    /// own tab in the new worktree Workspace, starts there, and then closes
+    /// the bare root pane so the Workspace holds only the agent. A refused
+    /// start propagates to the caller, which removes the whole worktree.
+    private func startAgentInEnvironmentTab(
+        _ launch: AgentLaunchRequest,
+        worktree created: WorktreeCreatedResponse
+    ) async throws -> Agent {
+        let tab = try await request(
+            method: "tab.create",
+            params: TabCreateParams(
+                env: launch.environmentParameter,
+                focus: false,
+                label: launch.resolvedTabLabel,
+                workspaceID: created.workspace.workspaceID),
+            decoding: TabCreatedResponse.self)
+        let response = try await startAgentAwaitingShell(
+            launch,
+            paneID: tab.rootPane.paneID)
+        // Cosmetic: the agent already runs, so a failed close only leaves
+        // an idle shell tab beside it.
+        try? await closePane(PaneTarget(paneID: created.rootPane.paneID))
+        return Agent(response.agent)
     }
 
     private func removeCreatedWorktree(workspaceID: String) async throws {

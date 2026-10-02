@@ -60,6 +60,7 @@ struct StartAgentStoreTests {
             [.claude]
         },
         remoteHome: @escaping (Host.ID) async throws -> String = { _ in "/home/you" },
+        customAgents: @escaping () -> [CustomAgent] = { [] },
         awaitAgentVisible: @escaping (ConsoleAgent.ID) async -> Void = { _ in },
         origin: StartAgentStore.LaunchOrigin? = nil,
         recents: RecentWorkspaceStore? = nil,
@@ -69,6 +70,7 @@ struct StartAgentStoreTests {
             hosts: hosts, workspaces: workspaces,
             existingAgentNames: existingAgentNames,
             discoverAgentKinds: agentKinds,
+            customAgents: customAgents,
             remoteHome: remoteHome,
             start: { params, destination, hostID in
                 try await recorder.record(params, destination, hostID)
@@ -1309,5 +1311,195 @@ struct StartAgentStoreTests {
 
         #expect(store.state == .editing)
         #expect(recorder.params.isEmpty)
+    }
+
+    // MARK: Custom Agents
+
+    /// The two aliases the feature exists for: `c` adds flags, `cg` adds a
+    /// config directory under the Host's home as well.
+    private static let cAlias = CustomAgent(
+        name: "c", kind: .claude, arguments: "--chrome --dangerously-skip-permissions")
+    private static let cgAlias = CustomAgent(
+        name: "cg", kind: .claude, arguments: "--dangerously-skip-permissions",
+        environment: "CLAUDE_CONFIG_DIR=~/.claude-gocomply")
+
+    @Test func customAgentsAreOfferedOnlyWhereTheirKindIsInstalledAndTheyParse() async {
+        let broken = CustomAgent(name: "broken", kind: .claude, arguments: "--x \"unclosed")
+        let codex = CustomAgent(name: "cx", kind: .codex)
+        let store = makeStore(
+            hosts: [.fixture()],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            customAgents: { [Self.cAlias, broken, codex] },
+            recorder: StartRecorder())
+        await store.discoverAgents()
+
+        #expect(store.availableCustomAgents.map(\.name) == ["c"])
+    }
+
+    @Test func aCustomAgentLaunchesItsKindWithItsArgumentsBeforeTheForms() async throws {
+        let host = Host.fixture()
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [host],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            customAgents: { [Self.cAlias] },
+            recorder: recorder)
+        await store.discoverAgents()
+        store.agentChoice = .custom(Self.cAlias.id)
+        store.arguments = "--continue"
+
+        await store.submit()
+
+        let request = try #require(recorder.params.first)
+        #expect(request.kind == "claude")
+        #expect(
+            request.arguments == ["--chrome", "--dangerously-skip-permissions", "--continue"])
+        #expect(request.environment == [:])
+        #expect(request.name == "c")
+        #expect(store.state == started(on: host))
+    }
+
+    @Test func aCustomAgentsEnvironmentIsExpandedAgainstTheHostsHome() async {
+        let recorder = StartRecorder()
+        var homeProbes = 0
+        let store = makeStore(
+            hosts: [.fixture()],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            remoteHome: { _ in
+                homeProbes += 1
+                return "/Users/abhi"
+            },
+            customAgents: { [Self.cgAlias] },
+            recorder: recorder)
+        await store.discoverAgents()
+        store.agentChoice = .custom(Self.cgAlias.id)
+
+        await store.submit()
+
+        #expect(homeProbes == 1)
+        #expect(
+            recorder.params.first?.environment
+                == ["CLAUDE_CONFIG_DIR": "/Users/abhi/.claude-gocomply"])
+        #expect(recorder.params.first?.arguments == ["--dangerously-skip-permissions"])
+    }
+
+    @Test func anEnvironmentWithoutHomeReferencesSkipsTheHomeProbe() async {
+        let literal = CustomAgent(
+            name: "lit", kind: .claude, environment: "CLAUDE_CONFIG_DIR=/opt/claude")
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [.fixture()],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            remoteHome: { _ in
+                Issue.record("the home directory was probed for a literal value")
+                return "/unused"
+            },
+            customAgents: { [literal] },
+            recorder: recorder)
+        await store.discoverAgents()
+        store.agentChoice = .custom(literal.id)
+
+        await store.submit()
+
+        #expect(recorder.params.first?.environment == ["CLAUDE_CONFIG_DIR": "/opt/claude"])
+    }
+
+    @Test func aFailedHomeProbeStopsACustomLaunchBeforeDispatch() async {
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [.fixture()],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            remoteHome: { _ in throw TransportError.timedOut },
+            customAgents: { [Self.cgAlias] },
+            recorder: recorder)
+        await store.discoverAgents()
+        store.agentChoice = .custom(Self.cgAlias.id)
+
+        await store.submit()
+
+        #expect(recorder.params.isEmpty)
+        #expect(store.state == .failed("Resolving the Host's home directory timed out."))
+    }
+
+    @Test func aCustomAgentNamesItsAgentsAfterItselfWithTheUsualSuffixes() async {
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [.fixture()],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            existingAgentNames: { _ in ["cg", "cg-2"] },
+            customAgents: { [Self.cgAlias] },
+            recorder: recorder)
+        await store.discoverAgents()
+        store.agentChoice = .custom(Self.cgAlias.id)
+
+        #expect(store.defaultAgentName == "cg-3")
+        await store.submit()
+        #expect(recorder.params.first?.name == "cg-3")
+    }
+
+    @Test func aCustomAgentWhoseNameIsNoAgentNameFallsBackToTheKind() {
+        let spaced = CustomAgent(name: "Work Claude", kind: .claude)
+        #expect(StartAgentStore.defaultNameBase(kind: .claude, customAgent: spaced) == "claude")
+        #expect(StartAgentStore.defaultNameBase(kind: .claude, customAgent: Self.cgAlias) == "cg")
+        #expect(StartAgentStore.defaultNameBase(kind: .claude, customAgent: nil) == "claude")
+    }
+
+    @Test func choosingABuiltInKindAfterACustomAgentDropsTheProfile() async {
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [.fixture()],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            customAgents: { [Self.cgAlias] },
+            recorder: recorder)
+        await store.discoverAgents()
+        store.agentChoice = .custom(Self.cgAlias.id)
+        store.agentChoice = .builtIn(.claude)
+
+        #expect(store.selectedCustomAgent == nil)
+        await store.submit()
+        #expect(recorder.params.first?.arguments == [])
+        #expect(recorder.params.first?.environment == [:])
+        #expect(recorder.params.first?.name == "claude")
+    }
+
+    @Test func theLastLaunchedChoiceIsPreselectedOnTheNextForm() async {
+        let host = Host.fixture()
+        let recents = makeRecents()
+        let first = makeStore(
+            hosts: [host],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            customAgents: { [Self.cgAlias] },
+            recents: recents,
+            recorder: StartRecorder())
+        await first.discoverAgents()
+        first.agentChoice = .custom(Self.cgAlias.id)
+        await first.submit()
+
+        let second = makeStore(
+            hosts: [host],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            customAgents: { [Self.cgAlias] },
+            recents: recents,
+            recorder: StartRecorder())
+        await second.discoverAgents()
+
+        #expect(second.agentChoice == .custom(Self.cgAlias.id))
+        #expect(second.selectedAgentKind == .claude)
+    }
+
+    @Test func aRememberedChoiceTheHostNoLongerOffersFallsBackToDetection() async {
+        let host = Host.fixture()
+        let recents = makeRecents()
+        recents.rememberAgentChoice(.builtIn(.codex), for: host.id)
+        let deleted = makeRecents()
+        deleted.rememberAgentChoice(.custom(UUID()), for: host.id)
+
+        for store in [
+            makeStore(hosts: [host], recents: recents, recorder: StartRecorder()),
+            makeStore(hosts: [host], recents: deleted, recorder: StartRecorder()),
+        ] {
+            await store.discoverAgents()
+            #expect(store.agentChoice == .builtIn(.claude))
+        }
     }
 }

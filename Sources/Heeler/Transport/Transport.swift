@@ -478,10 +478,15 @@ struct AgentLaunchRequest: Sendable, Equatable {
     /// because herdr constrains agent names to a lowercase slug while a tab
     /// label accepts any text.
     let tabLabel: String?
+    /// Environment for the shell the agent is launched in, as a Custom Agent
+    /// defines it. herdr types `<kind> <args>` into the pane's shell, so the
+    /// variables ride on the call that creates the pane and the shell hands
+    /// them on. Values are passed verbatim; home expansion happens before.
+    let environment: [String: String]
 
     init(
         kind: String, name: String, arguments: [String] = [], workspaceID: String? = nil,
-        cwd: String? = nil, tabLabel: String? = nil
+        cwd: String? = nil, tabLabel: String? = nil, environment: [String: String] = [:]
     ) {
         self.kind = kind
         self.name = name
@@ -489,7 +494,11 @@ struct AgentLaunchRequest: Sendable, Equatable {
         self.workspaceID = workspaceID
         self.cwd = cwd
         self.tabLabel = tabLabel
+        self.environment = environment
     }
+
+    /// The `env` parameter for the creating call; nil keeps it off the wire.
+    var environmentParameter: [String: String]? { environment.isEmpty ? nil : environment }
 
     /// The label the launch's tab should carry: the explicit tab label when
     /// one was given, otherwise the agent's name.

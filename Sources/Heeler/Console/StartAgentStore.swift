@@ -59,6 +59,13 @@ final class StartAgentStore {
         case newWorkspace(NewWorkspaceSpec)
     }
 
+    /// One option in the Agent picker: an installed kind as herdr knows it,
+    /// or a saved Custom Agent layered over one.
+    enum AgentChoice: Hashable {
+        case builtIn(SupportedAgentKind)
+        case custom(CustomAgent.ID)
+    }
+
     enum ArgumentError: Error, Equatable {
         case danglingEscape
         case unclosedSingleQuote
@@ -95,6 +102,7 @@ final class StartAgentStore {
                 pickedWorkspaceID = nil
                 availableAgentKinds = []
                 selectedAgentKind = nil
+                selectedCustomAgentID = nil
                 agentDiscoveryState = .idle
                 launchTarget = .existingWorkspace
                 newWorkspaceDirectory = ""
@@ -143,8 +151,11 @@ final class StartAgentStore {
     /// the form: empty falls back to a kind-derived name (`claude`,
     /// `claude-2`, …), mirroring how the herdr TUI labels unnamed agents.
     var name: String = ""
-    /// The canonical kind selected from the Host availability probe.
+    /// The canonical kind selected from the Host availability probe. With a
+    /// Custom Agent chosen, its base kind.
     var selectedAgentKind: SupportedAgentKind?
+    /// The chosen Custom Agent, if the pick is one rather than a bare kind.
+    private(set) var selectedCustomAgentID: CustomAgent.ID?
     /// Optional native arguments, parsed into argv without invoking a shell.
     /// The editor disables smart punctuation at the UIKit input-trait layer;
     /// parsing still normalizes any smart characters supplied by paste or a
@@ -216,6 +227,9 @@ final class StartAgentStore {
     /// skipping them merely bumps the suffix.
     private let existingAgentNames: (Host.ID) -> Set<String>
     private let discoverAgentKinds: (Host.ID) async throws -> [SupportedAgentKind]
+    /// The saved Custom Agents, read live so an edit made from this form
+    /// shows up in its picker at once.
+    private let customAgentsProvider: () -> [CustomAgent]
     /// Resolves the Host's home directory for a name-only New Workspace
     /// launch; fetched at submit so an unreachable Host never blocks editing.
     private let remoteHome: (Host.ID) async throws -> String
@@ -238,6 +252,7 @@ final class StartAgentStore {
         workspaces: @escaping (Host.ID) -> [ConsoleWorkspace],
         existingAgentNames: @escaping (Host.ID) -> Set<String>,
         discoverAgentKinds: @escaping (Host.ID) async throws -> [SupportedAgentKind],
+        customAgents: @escaping () -> [CustomAgent] = { [] },
         remoteHome: @escaping (Host.ID) async throws -> String,
         start: @escaping (AgentLaunchRequest, LaunchDestination, Host.ID) async throws -> Agent,
         awaitAgentVisible: @escaping (ConsoleAgent.ID) async -> Void,
@@ -249,6 +264,7 @@ final class StartAgentStore {
         self.workspacesProvider = workspaces
         self.existingAgentNames = existingAgentNames
         self.discoverAgentKinds = discoverAgentKinds
+        self.customAgentsProvider = customAgents
         self.remoteHome = remoteHome
         self.start = start
         self.awaitAgentVisible = awaitAgentVisible
@@ -280,6 +296,46 @@ final class StartAgentStore {
         Self.parseArguments(Self.normalizeSmartPunctuation(arguments))
     }
 
+    /// The Custom Agents this Host can run: their base kind was detected
+    /// there and the profile itself parses. Others stay saved but unlisted.
+    var availableCustomAgents: [CustomAgent] {
+        customAgentsProvider().filter { agent in
+            guard let kind = agent.supportedKind else { return false }
+            return availableAgentKinds.contains(kind) && agent.validationMessage == nil
+        }
+    }
+
+    var selectedCustomAgent: CustomAgent? {
+        guard let selectedCustomAgentID else { return nil }
+        return availableCustomAgents.first { $0.id == selectedCustomAgentID }
+    }
+
+    /// The picker's selection, mapped onto the kind and Custom Agent fields.
+    var agentChoice: AgentChoice? {
+        get {
+            if let selectedCustomAgent { return .custom(selectedCustomAgent.id) }
+            return selectedAgentKind.map(AgentChoice.builtIn)
+        }
+        set {
+            switch newValue {
+            case .builtIn(let kind):
+                // Only what the Host reported: a remembered kind may be gone.
+                guard availableAgentKinds.contains(kind) else { return }
+                selectedCustomAgentID = nil
+                selectedAgentKind = kind
+            case .custom(let id):
+                guard let agent = availableCustomAgents.first(where: { $0.id == id }) else {
+                    return
+                }
+                selectedCustomAgentID = id
+                selectedAgentKind = agent.supportedKind
+            case nil:
+                selectedCustomAgentID = nil
+                selectedAgentKind = nil
+            }
+        }
+    }
+
     var argumentErrorMessage: String? {
         guard case .failure(let error) = parsedArguments else { return nil }
         return error.message
@@ -298,7 +354,9 @@ final class StartAgentStore {
     /// fallback is never a surprise.
     var defaultAgentName: String? {
         guard let selectedHostID, let kind = selectedAgentKind else { return nil }
-        return Self.defaultAgentName(for: kind, taken: existingAgentNames(selectedHostID))
+        return Self.defaultAgentName(
+            base: Self.defaultNameBase(kind: kind, customAgent: selectedCustomAgent),
+            taken: existingAgentNames(selectedHostID))
     }
 
     /// User-facing branch feedback; nil while the toggle is off or the field
@@ -346,17 +404,23 @@ final class StartAgentStore {
         guard let hostID = selectedHostID else {
             availableAgentKinds = []
             selectedAgentKind = nil
+            selectedCustomAgentID = nil
             agentDiscoveryState = .idle
             return
         }
         availableAgentKinds = []
         selectedAgentKind = nil
+        selectedCustomAgentID = nil
         agentDiscoveryState = .loading
         do {
             let kinds = try await discoverAgentKinds(hostID)
             guard selectedHostID == hostID else { return }
             availableAgentKinds = kinds
             selectedAgentKind = kinds.first
+            // Reopen on the last launched choice when this Host still offers it.
+            if let remembered = recents.agentChoice(for: hostID) {
+                agentChoice = remembered
+            }
             agentDiscoveryState = .loaded
         } catch is CancellationError {
             guard selectedHostID == hostID else { return }
@@ -379,13 +443,48 @@ final class StartAgentStore {
             worktreeBranchErrorMessage == nil,
             nameErrorMessage == nil
         else { return }
+        let customAgent = selectedCustomAgent
+        var launchArguments = arguments
+        var environmentEntries: [CustomAgent.EnvironmentEntry] = []
+        if let customAgent {
+            guard case .success(let customArguments) = customAgent.parsedArguments,
+                case .success(let entries) = customAgent.parsedEnvironment
+            else { return }
+            // The profile's arguments first, the form's after: an alias's
+            // flags precede whatever is typed after it.
+            launchArguments = customArguments + arguments
+            environmentEntries = entries
+        }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let agentName =
             trimmedName.isEmpty
-            ? Self.defaultAgentName(for: kind, taken: existingAgentNames(hostID))
+            ? Self.defaultAgentName(
+                base: Self.defaultNameBase(kind: kind, customAgent: customAgent),
+                taken: existingAgentNames(hostID))
             : trimmedName
         isStarting = true
         defer { isStarting = false }
+        var environment: [String: String] = [:]
+        if !environmentEntries.isEmpty {
+            var home: String?
+            if CustomAgent.needsHome(environmentEntries) {
+                state = .starting
+                do {
+                    home = try await remoteHome(hostID)
+                } catch {
+                    state = .failed(Self.homeProbeMessage(for: error))
+                    return
+                }
+                guard selectedHostID == hostID else {
+                    state = .editing
+                    return
+                }
+            }
+            for entry in environmentEntries {
+                environment[entry.key] =
+                    home.map { CustomAgent.expandingHome(entry.value, home: $0) } ?? entry.value
+            }
+        }
         // A name-only New Workspace launch has no browsed directory: fall
         // back to the Host's home directory, resolved at submit so an
         // unreachable Host is reported here instead of blocking the form.
@@ -429,12 +528,15 @@ final class StartAgentStore {
         let request = AgentLaunchRequest(
             kind: kind.rawValue,
             name: agentName,
-            arguments: arguments,
+            arguments: launchArguments,
             workspaceID: workspaceID,
             cwd: origin?.cwd,
-            tabLabel: Self.nonEmptyTrimmed(tabLabel))
+            tabLabel: Self.nonEmptyTrimmed(tabLabel),
+            environment: environment)
         do {
             let agent = try await start(request, destination, hostID)
+            recents.rememberAgentChoice(
+                customAgent.map { .custom($0.id) } ?? .builtIn(kind), for: hostID)
             if case .newWorkspace = destination {
                 recents.remember(agent.workspaceID, for: hostID)
             } else if let workspaceID {
@@ -483,7 +585,7 @@ final class StartAgentStore {
     /// passing it through a shell. Quotes group whitespace, adjacent quoted
     /// and unquoted segments join one argument, and backslash escapes the next
     /// character. Empty quoted arguments are preserved.
-    static func parseArguments(_ input: String) -> Result<[String], ArgumentError> {
+    nonisolated static func parseArguments(_ input: String) -> Result<[String], ArgumentError> {
         enum Quote {
             case single
             case double
@@ -571,16 +673,32 @@ final class StartAgentStore {
     /// `kind-3`, … skipping names already live on the Host. Kind identifiers
     /// are lowercase ASCII, so the result always passes herdr's name rule.
     static func defaultAgentName(for kind: SupportedAgentKind, taken: Set<String>) -> String {
-        guard taken.contains(kind.rawValue) else { return kind.rawValue }
+        defaultAgentName(base: kind.rawValue, taken: taken)
+    }
+
+    /// The same numbering over any base that already passes herdr's name
+    /// rule with room for a suffix.
+    static func defaultAgentName(base: String, taken: Set<String>) -> String {
+        guard taken.contains(base) else { return base }
         var suffix = 2
-        while taken.contains("\(kind.rawValue)-\(suffix)") { suffix += 1 }
-        return "\(kind.rawValue)-\(suffix)"
+        while taken.contains("\(base)-\(suffix)") { suffix += 1 }
+        return "\(base)-\(suffix)"
+    }
+
+    /// A Custom Agent names its agents after itself (`cg`, `cg-2`) when its
+    /// name is a valid agent name short enough to number; otherwise, and for
+    /// a bare kind, the kind does.
+    static func defaultNameBase(kind: SupportedAgentKind, customAgent: CustomAgent?) -> String {
+        guard let name = customAgent?.trimmedName, name.count <= 28,
+            AgentName.validationError(name) == nil
+        else { return kind.rawValue }
+        return name
     }
 
     /// Normalizes smart punctuation that arrives through paste or a
     /// third-party keyboard. The editor itself disables these substitutions;
     /// this is a defensive parse-boundary fallback, never an edit-time write.
-    static func normalizeSmartPunctuation(_ text: String) -> String {
+    nonisolated static func normalizeSmartPunctuation(_ text: String) -> String {
         guard text.contains(where: Self.isSmartPunctuation) else { return text }
         var result = ""
         result.reserveCapacity(text.count + 2)
@@ -601,7 +719,7 @@ final class StartAgentStore {
         return result
     }
 
-    private static func isSmartPunctuation(_ character: Character) -> Bool {
+    nonisolated private static func isSmartPunctuation(_ character: Character) -> Bool {
         switch character {
         case "\u{201C}", "\u{201D}", "\u{2018}", "\u{2019}", "\u{2014}", "\u{2013}":
             true
@@ -615,7 +733,7 @@ final class StartAgentStore {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func isControl(_ character: Character) -> Bool {
+    nonisolated private static func isControl(_ character: Character) -> Bool {
         character.unicodeScalars.contains {
             CharacterSet.controlCharacters.contains($0)
         }
