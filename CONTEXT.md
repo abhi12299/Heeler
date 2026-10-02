@@ -40,6 +40,10 @@ _Avoid_: QR code, invite
 A single-use, TTL-bound Ed25519 keypair carried inside a Pairing Code. Its authorized_keys line is restricted to a forced command that can only perform Enrollment; it is destroyed on success or expiry.
 _Avoid_: temp key, one-time password
 
+**Tailscale SSH Host**:
+A Host reached through tailscaled's SSH server instead of OpenSSH. The phone's tailnet identity and the tailnet policy authorize it, so it has no credential and no Enrollment; a `check` policy may hold a connection until the user approves a Tailscale login link. Its Pairing Code carries `auth: tailscale` and no Bootstrap Key.
+_Avoid_: tailnet key, Tailscale login (that is the browser check)
+
 **Enrollment**:
 The server-side step of Pairing: the forced command appends the Device Key's public key to authorized_keys. Distinct from Pairing as a whole — failure copy must say which step failed.
 _Avoid_: install key, authorization

@@ -103,6 +103,67 @@ code carries the addresses, the host key fingerprint, and SSH key enrollment.
 The same [plugin](plugin/README.md) delivers the encrypted notifications once
 you enable them for the Host in the app.
 
+## This fork: free Apple ID build and Tailscale SSH
+
+This fork ([abhi12299/Heeler](https://github.com/abhi12299/Heeler)) adds two
+things upstream does not ship.
+
+### Free Apple ID build
+
+No paid Apple Developer account is needed to run Heeler on your own iPhone:
+
+1. In Xcode, **Settings > Accounts**, sign in with your Apple ID. That creates
+   a free Personal Team.
+2. Connect the iPhone by USB, unlock it, and tap **Trust**. Turn on
+   **Settings > Privacy & Security > Developer Mode** (the phone restarts).
+3. Run `make free-install`. It generates `HeelerFree.xcodeproj` from
+   `project.yml` (`scripts/free-build/generate-free-project.py`), then builds,
+   installs, and launches. With several free teams on the Mac, pass
+   `FREE_TEAM=<team id>`. On the first launch, trust the developer under
+   **Settings > General > VPN & Device Management** if iOS asks you to.
+
+A free team cannot sign push or app groups, so the free build drops the
+Notification Service and Widgets extensions and both entitlements. The trade-offs:
+
+- no Agent Notifications and no lock-screen Live Activity;
+- the build expires after **7 days** — run `make free-install` again to renew it;
+- a free team may sideload at most **3 apps** per device.
+
+The committed project, entitlements, and Info.plist are untouched; the free
+project is generated and git-ignored.
+
+### Tailscale SSH Hosts
+
+A machine with [Tailscale SSH](https://tailscale.com/kb/1193/tailscale-ssh)
+on (`tailscale set --ssh`) can be a Host with no OpenSSH server at all — on
+macOS, Remote Login can stay off. tailscaled answers port 22 on the machine's
+tailnet addresses and authorizes by the phone's tailnet identity and your
+tailnet policy, so nothing is enrolled on the machine.
+
+- **Add by hand:** Add Host, address = tailnet IP or MagicDNS name, port 22,
+  user = your account on the machine, method **Tailscale SSH**. Trust the host
+  key on first connect: it is tailscaled's own key, reached over the
+  WireGuard-authenticated tailnet.
+- **Or pair:** install this fork's plugin and invoke the pairing action:
+
+  ```bash
+  herdr plugin install abhi12299/Heeler/plugin --ref main --yes
+  herdr plugin action invoke heeler.pair
+  ```
+
+  On a machine with Tailscale SSH serving and no OpenSSH host key, the popup
+  shows a Tailscale SSH Pairing Code (force it with `"auth": "tailscale"` in
+  `pair.json`). The code holds only the addresses and the user — no key, no
+  expiry.
+
+If your tailnet policy uses `check` mode, Heeler shows a **Tailscale SSH
+check** card with the login link while tailscaled holds the connection.
+Approve it in the browser and the connection continues; one approval lasts
+for the policy's check period. The policy must allow your account as the SSH
+user (`"users": ["<you>"]`) and must not disable forwarding: Heeler reaches
+herdr's socket through stream-local forwarding, which Tailscale SSH permits
+inside your home directory.
+
 ## Stack
 
 - SwiftUI, iOS 18+, iPhone and iPad. iPad support is restored in 0.1.8 with Magic Keyboard shortcuts, multiwindow, and drag and drop.
