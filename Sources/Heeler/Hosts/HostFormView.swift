@@ -92,7 +92,8 @@ struct HostFormView: View {
                     case .tailscale:
                         Text(
                             "For a Host running Tailscale SSH (tailscale set --ssh), reached on "
-                                + "its tailnet address or MagicDNS name, port 22. Your tailnet "
+                                + "its tailnet IP or full MagicDNS name (host.tailnet.ts.net; a "
+                                + "bare machine name does not resolve here), port 22. Your tailnet "
                                 + "policy authorizes this device; nothing is installed on the "
                                 + "Host. If the policy asks for a check, Heeler shows the "
                                 + "Tailscale login link.")

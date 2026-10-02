@@ -1,3 +1,6 @@
+#if HEELER_FREE_BUILD
+    import HeelerSSH
+#endif
 import SwiftUI
 
 /// App entry point. M0 ships only the buildable skeleton; the Console UI
@@ -12,6 +15,12 @@ struct HeelerApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        #if HEELER_FREE_BUILD
+            // A sideloaded build has no TestFlight crash or log channel; its
+            // SSH phase diagnostics go to stdout for `devicectl --console`.
+            setvbuf(stdout, nil, _IOLBF, 0)
+            SSHDiagnostics.addSink(SSHDiagnostics.printingSink())
+        #endif
         try? ImagePreparer.cleanupRemnants()
         try? FilePreparer.cleanupRemnants()
     }
