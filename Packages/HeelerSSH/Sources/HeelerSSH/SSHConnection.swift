@@ -182,6 +182,23 @@ public final class SSHConnection: Sendable {
             timeout: timeout)
     }
 
+    /// Authenticates with SSH `none`, for servers that authorize by something
+    /// other than a client credential (Tailscale SSH: tailnet identity). Each
+    /// distinct SSH_MSG_USERAUTH_BANNER is passed to `onBanner` while the
+    /// request is pending — a Tailscale `check` policy sends its login URL
+    /// that way and holds authentication until the login completes, so
+    /// `timeout` must cover a person finishing that login.
+    public func authenticateNone(
+        username: String,
+        timeout: Duration,
+        onBanner: @escaping @Sendable (String) -> Void
+    ) async throws {
+        try await driver.authenticateNone(
+            username: username,
+            timeout: timeout,
+            onBanner: onBanner)
+    }
+
     public func execute(
         _ command: String,
         input: Data = Data(),

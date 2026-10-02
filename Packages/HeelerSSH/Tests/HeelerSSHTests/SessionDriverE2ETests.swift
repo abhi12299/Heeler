@@ -52,6 +52,25 @@ struct SessionDriverE2ETests {
         try await connection.close(timeout: .seconds(1))
     }
 
+    @Test("none authentication declined by OpenSSH leaves the session for key auth")
+    func noneAuthenticationDeclinedLeavesSessionUsable() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await SSHConnection.connect(
+            to: environment.endpoint,
+            timeout: SessionDriverTestEnvironment.setupTimeout)
+
+        await #expect(throws: SSHError.authenticationFailed) {
+            try await connection.authenticateNone(
+                username: environment.username,
+                timeout: .seconds(5),
+                onBanner: { _ in })
+        }
+        try await environment.authenticate(connection)
+        let result = try await connection.execute("printf usable", timeout: .seconds(5))
+        #expect(result.stdout == Data("usable".utf8))
+        try await connection.close(timeout: .seconds(1))
+    }
+
     @Test("public connection resolves localhost before authenticating")
     func publicConnectionResolvesLocalhost() async throws {
         let environment = try #require(SessionDriverTestEnvironment.current)

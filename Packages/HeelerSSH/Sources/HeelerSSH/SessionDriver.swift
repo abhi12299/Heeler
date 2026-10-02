@@ -364,6 +364,78 @@ actor SessionDriver {
         }
     }
 
+    /// SSH `none` authentication: the server authorizes the connection by
+    /// something other than a client credential. Tailscale SSH does exactly
+    /// this — tailnet identity and ACL decide — and under a `check` policy it
+    /// holds the request open for a browser login, announcing the login URL
+    /// in an SSH_MSG_USERAUTH_BANNER first. Each distinct banner is handed to
+    /// `onBanner` while the request is still pending.
+    ///
+    /// libssh2 bounds every packet wait by the session's read timeout (60 s
+    /// by default), which a held check outlasts, so the timeout is raised to
+    /// this call's budget for its duration.
+    func authenticateNone(
+        username: String,
+        timeout: Duration,
+        onBanner: @escaping @Sendable (String) -> Void
+    ) async throws {
+        try await withDiagnosticPhase("none authentication") {
+            await acquireOperation()
+            defer { releaseOperation() }
+
+            guard valid, !forwarding, !authenticated, let session else {
+                throw SSHError.connectionInvalidated
+            }
+            guard !username.isEmpty else { throw SSHError.authenticationFailed }
+            let deadline = ContinuousClock.now.advanced(by: timeout)
+
+            let previousReadTimeout = libssh2_session_get_read_timeout(session)
+            let budgetSeconds = max(1, Int(timeout.components.seconds) + 1)
+            libssh2_session_set_read_timeout(
+                session, max(previousReadTimeout, budgetSeconds))
+            defer { libssh2_session_set_read_timeout(session, previousReadTimeout) }
+
+            var lastBanner: String?
+            // libssh2_userauth_banner records "missing banner" as the session's
+            // last error when there is none yet, which would mask the EAGAIN the
+            // retry loop reads; the caller's error state is put back after it.
+            func reportBanner() {
+                var pointer: UnsafeMutablePointer<CChar>?
+                let saved = libssh2_session_last_errno(session)
+                let found = libssh2_userauth_banner(session, &pointer)
+                libssh2_session_set_last_error(session, saved, nil)
+                guard found == 0, let pointer else { return }
+                let banner = String(cString: pointer)
+                guard banner != lastBanner else { return }
+                lastBanner = banner
+                onBanner(banner)
+            }
+
+            do {
+                let result = try await repeatUntilComplete(deadline: deadline) {
+                    let methods = username.withCString { usernamePointer in
+                        libssh2_userauth_list(
+                            session, usernamePointer, UInt32(username.utf8.count))
+                    }
+                    let error = libssh2_session_last_errno(session)
+                    reportBanner()
+                    // A method list is the server declining `none`.
+                    if methods != nil { return LIBSSH2_ERROR_AUTHENTICATION_FAILED }
+                    if libssh2_userauth_authenticated(session) != 0 { return 0 }
+                    return error
+                }
+                guard result == 0 else { throw mapAuthenticationError(result) }
+                authenticated = true
+            } catch {
+                let normalized = normalize(error)
+                if normalized != .authenticationFailed {
+                    invalidateResources()
+                }
+                throw normalized
+            }
+        }
+    }
+
     func execute(command: String, input: Data, timeout: Duration) async throws -> SSHExecResult {
         try await withDiagnosticPhase("exec") {
             await acquireOperation()
