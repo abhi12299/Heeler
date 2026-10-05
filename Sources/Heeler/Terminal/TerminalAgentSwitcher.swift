@@ -23,6 +23,36 @@ extension TerminalAgentSwitcherItem {
     }
 }
 
+extension TerminalAgentSwitcherItem {
+    /// The chips for a list of Agents. A chip is titled as its Console row
+    /// is, which names a Workspace and Tab; Agents that share one would read
+    /// alike, so those lead with the Agent's own name instead.
+    @MainActor
+    static func items(
+        for agents: [ConsoleAgent], pins: PinnedAgentsStore,
+        layout: (ConsoleAgent) -> AgentRowLayout
+    ) -> [TerminalAgentSwitcherItem] {
+        let items = agents.map { TerminalAgentSwitcherItem(agent: $0, pins: pins, layout: layout($0)) }
+        var counts: [String: Int] = [:]
+        for item in items { counts[item.title, default: 0] += 1 }
+        return zip(agents, items).map { agent, item in
+            guard counts[item.title, default: 0] > 1 else { return item }
+            return TerminalAgentSwitcherItem(
+                id: item.id, title: sharedPlaceTitle(for: agent, place: item.title),
+                status: item.status, isPinned: item.isPinned)
+        }
+    }
+
+    /// The Agent's name, then the Workspace it runs in (or the shared title
+    /// where it has no label), kept inside a chip's length.
+    private static func sharedPlaceTitle(for agent: ConsoleAgent, place: String) -> String {
+        let name = agent.agent.displayName
+        let location = agent.workspaceLabel ?? place
+        let title = location == name ? name : "\(name) · \(location)"
+        return title.count > 48 ? String(title.prefix(47)) + "…" : title
+    }
+}
+
 /// What an Agent surface hands its switcher: the Agents to offer, the one
 /// currently on screen, where a tap goes, and where a Pin / Unpin goes.
 struct TerminalAgentSwitcher {

@@ -170,6 +170,37 @@ struct TerminalAgentSwitcherTests {
         #expect(opened == [agents[1].id])
     }
 
+    /// Agents that share a Tab share its place name, so their chips lead
+    /// with each Agent's own name; a chip that is already the only one of
+    /// its name keeps it.
+    @MainActor
+    @Test func agentsThatWouldShareAChipTitleAreNamedApart() throws {
+        let suiteName = "hm-switcher-names-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let pins = PinnedAgentsStore(defaults: defaults)
+        let agents = [
+            Self.makeAgent(pane: "p1", workspace: "heeler", name: "cg"),
+            Self.makeAgent(pane: "p2", workspace: "heeler", name: "elephants"),
+            Self.makeAgent(pane: "p3", workspace: "relay", name: "docs"),
+        ]
+
+        let items = TerminalAgentSwitcherItem.items(for: agents, pins: pins) { _ in .heelerDefault }
+
+        #expect(items.map(\.title) == ["cg · heeler", "elephants · heeler", "relay"])
+        #expect(items.map(\.id) == agents.map(\.id))
+    }
+
+    /// The Agents list ends a card's second line with the Host; an Agent
+    /// with a name of its own says which kind it is there too.
+    @Test func aNamedAgentsCardSaysItsKindBesideTheHost() {
+        let named = Self.makeAgent(pane: "p1", workspace: "heeler", name: "elephants")
+        let unnamed = Self.makeAgent(pane: "p2", workspace: "heeler")
+
+        #expect(AgentCardView.trailingContext(for: named) == "claude · devbox")
+        #expect(AgentCardView.trailingContext(for: unnamed) == "devbox")
+    }
+
     /// Switcher chips inherit pin state from the same store the Console list
     /// uses, so a pin made on one surface shows up on the other.
     @MainActor

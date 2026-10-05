@@ -79,8 +79,16 @@ struct AgentCardView: View {
         .padding(.bottom, CGFloat(min(layout.rowGap, 3)) * 8)
     }
 
+    /// What ends a card's second line: the Host, and before it the kind of
+    /// an Agent whose name no longer says what it is.
+    static func trailingContext(for agent: ConsoleAgent) -> String {
+        let kind = agent.agent.kind
+        guard let name = agent.agent.name, name != kind, !kind.isEmpty else { return agent.hostName }
+        return agent.hostName.isEmpty ? kind : "\(kind) · \(agent.hostName)"
+    }
+
     private var hostText: some View {
-        Text(verbatim: agent.hostName)
+        Text(verbatim: Self.trailingContext(for: agent))
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
