@@ -61,6 +61,21 @@ struct ConsoleAgent: Identifiable, Sendable, Equatable {
         return session.value.isEmpty ? nil : session.value
     }
 
+    /// The Agent whose session id names a transcript the Agent search can
+    /// read on the Host.
+    static let transcriptSearchAgent = "claude"
+
+    /// The id of this Agent's own session, when herdr reports one for
+    /// `transcriptSearchAgent`. It names the one transcript file searched
+    /// for this Agent.
+    var transcriptSessionID: String? {
+        guard
+            let session = agent.agentSession, session.kind == .id,
+            session.agent == Self.transcriptSearchAgent
+        else { return nil }
+        return session.value.isEmpty ? nil : session.value
+    }
+
     init(
         hostID: Host.ID,
         hostName: String,

@@ -1,8 +1,8 @@
 import Foundation
 import Observation
 
-/// Where each floating terminal control rests along the terminal's trailing
-/// edge, as a fraction of the room it has there (0 at the top, 1 at the
+/// Where each floating terminal control rests along the terminal edge it is
+/// docked to, as a fraction of the room it has there (0 at the top, 1 at the
 /// bottom). A fraction rather than points, so one remembered position fits
 /// every terminal height, rotation, and keyboard state.
 @MainActor
@@ -11,13 +11,17 @@ final class EdgeDockSettings {
     enum Control: String, CaseIterable, Sendable {
         case workspaceDrawer = "workspace-drawer"
         case messageJump = "message-jump"
+        case agentSearch = "agent-search"
 
         /// Where a control sits until the user moves it: the drawer handle
-        /// midway, the jump buttons as low as the keyboard band allows.
+        /// midway, the jump buttons as low as the keyboard band allows, and
+        /// the Agent search tab below the middle of its own edge, where a
+        /// back swipe rarely starts.
         var defaultFraction: CGFloat {
             switch self {
             case .workspaceDrawer: 0.5
             case .messageJump: 1
+            case .agentSearch: 0.75
             }
         }
 

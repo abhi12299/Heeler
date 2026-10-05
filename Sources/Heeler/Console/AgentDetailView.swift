@@ -301,6 +301,7 @@ struct AgentDetailView: View {
                         }
                     },
                     workspaceDrawer: workspaceDrawer,
+                    agentSearchDrawer: agentSearchDrawer,
                     // Retention swaps `attach` on appear and rebuilds this
                     // view; the build before that swap is a placeholder and
                     // must not spend the keyboard handoff meant for the real one.
@@ -404,6 +405,21 @@ struct AgentDetailView: View {
             agentID: agent.id,
             isPresenting: openTerminal.failure != nil || openTerminal.closeFailureMessage != nil
                 || terminalOpenFailure != nil || isChoosingTerminal))
+    }
+
+    /// Every running Agent across Workspaces, on the edge opposite the
+    /// Workspace drawer.
+    private var agentSearchDrawer: AgentSearchDrawer {
+        AgentSearchDrawer(
+            store: console.agentSearch,
+            selectedAgentID: agent.id,
+            edgeDock: terminal.edgeDock,
+            title: { [console] agent in
+                AgentCardPresentation(
+                    agent: agent, layout: console.rowLayout(for: agent.hostID)
+                ).switcherTitle
+            },
+            onSelect: onSwitch)
     }
 
     /// Nil outside a Console that can select terminals (a scene root), and

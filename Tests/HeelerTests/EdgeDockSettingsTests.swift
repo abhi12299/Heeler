@@ -30,6 +30,18 @@ struct EdgeDockSettingsTests {
         #expect(relaunched.fraction(for: .messageJump) == 0.75)
     }
 
+    @Test func theAgentSearchTabKeepsItsOwnPositionOnItsOwnEdge() throws {
+        let defaults = try makeDefaults()
+        let settings = EdgeDockSettings(defaults: defaults)
+        #expect(settings.fraction(for: .agentSearch) == 0.75)
+
+        settings.setFraction(0.1, for: .agentSearch)
+
+        let relaunched = EdgeDockSettings(defaults: defaults)
+        #expect(relaunched.fraction(for: .agentSearch) == 0.1)
+        #expect(relaunched.fraction(for: .workspaceDrawer) == 0.5)
+    }
+
     @Test func clampsToTheEdgeAndRejectsUnreadableValues() throws {
         let settings = EdgeDockSettings(defaults: try makeDefaults())
         settings.setFraction(1.4, for: .workspaceDrawer)
