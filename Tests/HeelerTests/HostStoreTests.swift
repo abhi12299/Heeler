@@ -291,6 +291,24 @@ struct HostStoreTests {
             .contains("hunter2") == false)
     }
 
+    @Test func duplicatingAPasswordHostStoresItsOwnCopyOfThePassword() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        let store = HostStore(defaults: defaults, secrets: InMemorySecretStore())
+        let original = Host.fixture(authMethod: .password)
+        try store.add(original, password: "hunter2")
+
+        let draft = HostDraft(
+            duplicating: original, password: try store.password(for: original),
+            existingNames: store.hosts.map(\.displayName))
+        let copy = try #require(draft.makeHost())
+        try store.add(copy, password: draft.passwordUpdate)
+        try store.remove(original.id)
+
+        #expect(store.hosts.map(\.id) == [copy.id])
+        #expect(try store.password(for: copy) == "hunter2")
+    }
+
     @Test func editKeepingPasswordFieldEmptyPreservesTheStoredPassword() throws {
         let (defaults, cleanup) = try makeDefaults()
         defer { cleanup() }

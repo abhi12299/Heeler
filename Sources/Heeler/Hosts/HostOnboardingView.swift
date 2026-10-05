@@ -19,6 +19,9 @@ struct HostOnboardingView: View {
     @State private var isEditing = false
     @State private var isConfirmingHostKeyReplacement = false
     @State private var sessionSelectionError: String?
+    /// A passing preflight not yet acted on: it may restart the Console's
+    /// connection once (see `HostOnboardingConsoleRecovery`).
+    @State private var isConsoleRecoveryArmed = false
 
     init(
         host: Host,
@@ -194,6 +197,27 @@ struct HostOnboardingView: View {
                 await store.runChecks()
             }
         }
+        .onChange(of: store.report) { _, report in
+            isConsoleRecoveryArmed = report == .allPassed
+        }
+        .onChange(of: consoleRecoveryInput) { _, input in
+            switch HostOnboardingConsoleRecovery.action(for: input) {
+            case .wait:
+                break
+            case .disarm:
+                isConsoleRecoveryArmed = false
+            case .retry:
+                isConsoleRecoveryArmed = false
+                retry()
+            }
+        }
+    }
+
+    private var consoleRecoveryInput: HostOnboardingConsoleRecovery.Input {
+        HostOnboardingConsoleRecovery.Input(
+            isArmed: isConsoleRecoveryArmed,
+            status: connectionStatus,
+            isManualReconnectInFlight: isManualReconnectInFlight)
     }
 
     private var authenticationLabel: String {
@@ -334,6 +358,50 @@ struct HostOnboardingConnectionPresentation: Equatable {
         }
         isSyncIssue = if case .connected = status { syncIssue != nil } else { false }
         footerMessage = isManualReconnectInFlight ? nil : connectionErrorMessage
+    }
+}
+
+/// The Console never prompts for host key trust, so a Host it rejected for
+/// an unpinned or mismatched key stays failed after onboarding pins the
+/// key. A passing preflight proves the pin and arms one Console retry,
+/// decided as soon as the Console settles: retry a trust failure, otherwise
+/// disarm, so a later failure never reuses an old proof.
+enum HostOnboardingConsoleRecovery {
+    struct Input: Equatable {
+        let isArmed: Bool
+        let status: EventsSessionStatus?
+        let isManualReconnectInFlight: Bool
+    }
+
+    enum Action: Equatable {
+        case wait
+        case disarm
+        case retry
+    }
+
+    static func action(for input: Input) -> Action {
+        // A manual Reconnect in flight is already retrying; decide once its
+        // outcome is known.
+        guard input.isArmed, !input.isManualReconnectInFlight else { return .wait }
+        switch input.status {
+        case .failed(let failure) where isHostKeyTrustFailure(failure):
+            return .retry
+        case .connecting, .reconnecting:
+            return .wait
+        case .failed, .connected, .suspended, .ended, nil:
+            return .disarm
+        }
+    }
+
+    private static func isHostKeyTrustFailure(_ failure: TransportError) -> Bool {
+        switch failure {
+        case .hostKeyRejected, .hostKeyMismatch:
+            true
+        case .jumpHostFailed(let underlying):
+            isHostKeyTrustFailure(underlying)
+        default:
+            false
+        }
     }
 }
 

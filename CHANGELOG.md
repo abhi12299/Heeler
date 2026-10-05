@@ -48,6 +48,11 @@ Entries reference the issue that motivated them.
   the Workspace's terminals, and an Agent's Changes. They start folded to a
   single button and stay shown once the user opens them. Swiping back from
   either follows the finger like any other screen. (#409)
+- Duplicate a Host from its long-press menu in Hosts. The add form opens
+  with every field filled in from that Host, including its password, named
+  the way Finder names copies ("laya-train copy", then "laya-train copy 2"),
+  and saving adds a new Host that goes through onboarding like any other.
+  (#413)
 
 ### Fixed
 
@@ -64,6 +69,9 @@ Entries reference the issue that motivated them.
   inherits legacy socket overrides. (#400)
 - Large diffs in Changes no longer wait for the Git timeout when the SSH
   connection briefly cannot send. (#402)
+- After you trust a new Host's key in its detail view, the Host now
+  connects as soon as the checks pass instead of staying failed until you
+  tap Reconnect. (#413)
 
 ## [0.1.12] - 2026-10-02
 
