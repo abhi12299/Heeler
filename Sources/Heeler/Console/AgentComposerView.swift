@@ -285,9 +285,7 @@ struct AgentComposerView: View {
                                     .accessibilityHidden(true)
                             }
                             Button {
-                                dictation.toggle(
-                                    draft: store.draft, selection: store.draftSelection
-                                ) { store.applyEditorDraft($0, selection: $1) }
+                                toggleDictation()
                             } label: {
                                 Image(systemName: dictation.isActive ? "mic.fill" : "mic")
                                     .font(.system(size: 15, weight: .semibold))
@@ -411,6 +409,18 @@ struct AgentComposerView: View {
                 isInputFocused = true
             }
         }
+    }
+
+    /// Starting dictation also raises the system keyboard, so the spoken
+    /// text can be corrected by hand without another tap.
+    private func toggleDictation() {
+        if !dictation.isActive {
+            setKeyboardPresentation(.system)
+            isInputFocused = true
+        }
+        dictation.toggle(
+            draft: store.draft, selection: store.draftSelection
+        ) { store.applyEditorDraft($0, selection: $1) }
     }
 
     private func switchKeyboard() {
