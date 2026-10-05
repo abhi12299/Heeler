@@ -657,10 +657,6 @@ private struct AgentComposerTextEditor: UIViewRepresentable {
         textView.adjustsFontForContentSizeCategory = true
         textView.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
         textView.textContainer.lineFragmentPadding = 0
-        // Correction traits are pinned in AgentComposerUITextView's
-        // initializers, identical to the terminal's — matching traits
-        // keep one keyboard context across the Direct Input responder
-        // transfer (de36399).
         textView.accessibilityLabel = "Message the Agent"
         textView.onKeyboardHandoffSettled = onKeyboardHandoffSettled
         return textView
@@ -784,6 +780,7 @@ final class AgentComposerUITextView: UITextView {
     private var keyboardPresentation: AgentComposerKeyboardPresentation = .hidden
     var onKeyboardHandoffSettled: ((UUID) -> Void)?
     private var activeKeyboardHandoffID: UUID?
+    private var isRequestingKeyboardHandoff = false
     /// Focus requested before the view is in a window. The keyboard is then
     /// taken over in the same pass the view is inserted — while the surface
     /// it inherits from is still first responder — so UIKit moves it between
@@ -849,22 +846,25 @@ final class AgentComposerUITextView: UITextView {
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
-        applyTerminalMatchedInputTraits()
+        applyComposerInputTraits()
         installKeyboardObservers()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        applyTerminalMatchedInputTraits()
+        applyComposerInputTraits()
         installKeyboardObservers()
     }
 
-    /// No-correction traits, identical to the terminal's — the parity
-    /// keeps one keyboard context across the Direct Input responder
-    /// transfer (de36399).
-    private func applyTerminalMatchedInputTraits() {
-        autocorrectionType = .no
-        spellCheckingType = .no
+    /// The draft is local text until Send, so it autocorrects and spell
+    /// checks like any message field; the terminal never does, because its
+    /// keystrokes reach the PTY at once. The candidate bar this adds changes
+    /// the keyboard's height across the Direct Input handoff, which
+    /// `TerminalKeyboardInset` settles. Smart punctuation and inline
+    /// predictions stay off: prompts often carry code.
+    private func applyComposerInputTraits() {
+        autocorrectionType = .yes
+        spellCheckingType = .yes
         smartQuotesType = .no
         smartDashesType = .no
         smartInsertDeleteType = .no
@@ -898,14 +898,26 @@ final class AgentComposerUITextView: UITextView {
         else { return }
         guard let activeKeyboardHandoffID else { return }
         self.activeKeyboardHandoffID = nil
-        onKeyboardHandoffSettled?(activeKeyboardHandoffID)
+        guard isRequestingKeyboardHandoff else {
+            onKeyboardHandoffSettled?(activeKeyboardHandoffID)
+            return
+        }
+        // iOS 26 publishes the settled frame from inside
+        // `becomeFirstResponder`, before the requester has learned the
+        // request succeeded; reporting it now would be discarded as unknown
+        // and leave the handoff to its fallback.
+        DispatchQueue.main.async { [weak self] in
+            self?.onKeyboardHandoffSettled?(activeKeyboardHandoffID)
+        }
     }
 
     @discardableResult
     func requestKeyboardHandoff(id: UUID) -> Bool {
         guard window != nil else { return false }
         activeKeyboardHandoffID = id
+        isRequestingKeyboardHandoff = true
         let accepted = becomeFirstResponder()
+        isRequestingKeyboardHandoff = false
         if !accepted {
             activeKeyboardHandoffID = nil
         }

@@ -70,20 +70,30 @@ Heeler 是一个 **agent 控制台**：把所有机器上正在运行的 coding 
 
 ## 连接原理
 
-Heeler 通过 SSH 使用 herdr 的 JSON API：每个请求经 direct-streamlocal
+在 macOS 和 Linux Host 上，Heeler 通过 SSH 使用 herdr 的 JSON API：每个请求经 direct-streamlocal
 通道直连 `herdr.sock`，一条长连接承载事件流，交互终端则在 SSH PTY 上运行
 `herdr agent attach --takeover`。前提只有 SSH 访问和一个运行中的
 herdr —— 不改服务器、不装额外软件包。SSH 服务器需允许 stream-local 转发
 （OpenSSH 默认开启）；若被关闭，引导流程会明确指出。
+
+Windows 原生 Host（herdr >= 0.9.3）通过 SSH 连接，需手动添加。
 
 不可直连的机器可以放在 SSH 跳板机之后：
 
 - [逐步搭建远程访问](docs/guides/vps-jump-host-setup.md)
 - [架构、安全边界与 VPS 迁移手册](docs/guides/vps-jump-host.md)
 
+## 安装
+
+从 [App Store](https://apps.apple.com/us/app/heeler-for-herdr/id6797263135) 或
+[TestFlight](https://testflight.apple.com/join/aXSxRn4r) 安装 Heeler。
+
+- **macOS / Linux：** 安装 [herdr](https://herdr.dev/docs/install/)，启用 SSH，再按下方步骤配对。
+- **Windows 原生环境：** 参见 [Windows 设置指南](docs/guides/windows-setup.md)。
+
 ## 添加机器
 
-在运行 herdr 的机器上（Node >= 20、herdr >= 0.7.5、已启用 OpenSSH 服务器
+在运行 herdr 的 macOS 或 Linux 机器上（Node >= 20、herdr >= 0.7.5、已启用 OpenSSH 服务器
 —— macOS 上是 **系统设置 > 通用 > 共享 > 远程登录**）：
 
 ```bash

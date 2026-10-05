@@ -68,8 +68,8 @@ struct PreflightReportTests {
         (.cancelled, .connection),
         (.channelFailed(detail: "boom"), .connection),
         (.eventsChannelAlreadyOpen, .connection),
-        // Not reachable from connect+ping (preflight never execs herdr).
-        (.herdrBinaryNotFound, .connection),
+        (.herdrBinaryNotFound, .herdrInstalled),
+        (.hostFeatureUnavailable(feature: "Windows requires remote-api-bridge"), .remoteEnvironment),
         (.jumpHostFailed(.sshUnreachable(detail: "refused")), .connection),
         (.tcpForwardingUnavailable, .connection),
         (.socketNotFound(path: "/home/dev/.config/herdr/herdr.sock"), .herdrInstalled),

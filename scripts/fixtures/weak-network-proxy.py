@@ -8,10 +8,15 @@
 # it forwards to the fixture sshd, delaying, rate limiting, fragmenting, and
 # abruptly severing the byte stream on the way.
 #
-# Every impairment is a function of byte counts and fixed durations, so a given
-# profile produces the same treatment on every run. The one stochastic knob,
-# jitter, is drawn from an explicitly seeded PRNG per connection, so it too
-# replays exactly. Nothing here sleeps for an unspecified amount of time.
+# Byte budgets, bounded propagation delays, and destination write limits are
+# explicit. Jitter uses a seeded PRNG per connection; the sequence replays for
+# the same receive boundaries. Receive boundaries themselves are OS-dependent,
+# so their propagation waits must overlap instead of limiting stream throughput.
+#
+# A profile change reaches live links at two points. Propagation delay is fixed
+# when a chunk arrives, so bytes already in flight keep it. The byte budget and
+# segment size apply when bytes leave, so queued bytes, including a write still
+# waiting for budget, move to the new rate instead of draining at the old one.
 #
 # Control protocol, one JSON request line per connection, one JSON response
 # line back, then close (the same shape as the herdr API socket):
@@ -21,15 +26,23 @@
 #   {"command": "cut"}                        RST every live proxied connection
 #   {"command": "stats"}                      counters since the last reset
 
+from __future__ import annotations
+
 import argparse
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 import json
 import random
+import select
 import socket
 import struct
 import threading
 import time
 
 RECEIVE_BYTES = 65536
+PENDING_BYTES = 4 * RECEIVE_BYTES
+POLL_SECONDS = 0.1
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -42,17 +55,19 @@ def parse_arguments() -> argparse.Namespace:
 
 
 class Profile:
-    """One deterministic impairment recipe, applied per direction."""
+    """One impairment recipe, applied to each direction separately."""
 
     def __init__(self, values: object = None) -> None:
         values = values if isinstance(values, dict) else {}
-        # Delivery delay for each chunk read off the source socket. Applied
-        # once per chunk rather than per fragment, so it models propagation
-        # delay instead of silently becoming a second rate limit.
+        # Delivery delay from each chunk's arrival, independent of later
+        # arrivals and later profiles. Propagation overlaps across a stream;
+        # sleeping before the next receive would add an unintended
+        # recv-dependent rate limit.
         self.latency_millis = float(values.get("latencyMillis", 0))
         self.jitter_millis = float(values.get("jitterMillis", 0))
         self.jitter_seed = int(values.get("jitterSeed", 0))
-        # Token bucket, refilled continuously; 0 disables the cap.
+        # Token bucket, refilled continuously; 0 disables the cap. Charged when
+        # bytes leave, so a new profile also meters bytes already queued.
         self.bandwidth_bytes_per_second = int(values.get("bandwidthBytesPerSecond", 0))
         # Largest single write onto the destination socket. Small values force
         # the peer through many partial reads and EAGAIN cycles, which is the
@@ -77,9 +92,16 @@ class TokenBucket:
         self.available = float(bytes_per_second)
         self.updated_at = time.monotonic()
 
-    def consume(self, count: int) -> None:
+    def consume(self, count: int, stopped: threading.Event | None = None,
+                superseded: Callable[[], bool] | None = None) -> bool:
+        """Takes `count` bytes of budget, waiting for the refill if needed.
+
+        Returns False without taking any budget once `stopped` is set, or when
+        `superseded` reports, at least once per poll interval of waiting, that
+        the caller should plan the write again under a newer profile.
+        """
         if self.bytes_per_second <= 0:
-            return
+            return True
         # The ceiling must admit the request itself. Clamping at one second's
         # worth alone would make `available >= count` unreachable whenever a
         # segment is larger than the per-second budget, and the loop would then
@@ -87,6 +109,8 @@ class TokenBucket:
         # interrupt. Today's profiles never ask for it; a future one might.
         ceiling = max(float(self.bytes_per_second), float(count))
         while True:
+            if stopped is not None and stopped.is_set():
+                return False
             now = time.monotonic()
             self.available = min(
                 ceiling,
@@ -95,8 +119,23 @@ class TokenBucket:
             self.updated_at = now
             if self.available >= count:
                 self.available -= count
-                return
-            time.sleep((count - self.available) / self.bytes_per_second)
+                return True
+            if superseded is not None and superseded():
+                return False
+            wait = (count - self.available) / self.bytes_per_second
+            if superseded is not None:
+                wait = min(wait, POLL_SECONDS)
+            if stopped is None:
+                time.sleep(wait)
+            elif stopped.wait(wait):
+                return False
+
+
+@dataclass
+class PendingChunk:
+    ready_at: float
+    data: bytes
+    offset: int = 0
 
 
 class Connection:
@@ -110,6 +149,12 @@ class Connection:
         self.proxy = proxy
         self.lock = threading.Lock()
         self.is_cut = False
+        self.stopped = threading.Event()
+        # These two fixture-owned endpoints are shared only by this pair of
+        # pumps. Nonblocking mode keeps every write cancellable on Darwin too,
+        # where MSG_DONTWAIT alone does not prevent send-buffer waits.
+        self.client.setblocking(False)
+        self.upstream.setblocking(False)
 
     def serve(self) -> None:
         threads = [
@@ -141,66 +186,186 @@ class Connection:
             if self.is_cut:
                 return False
             self.is_cut = True
-        linger = struct.pack("ii", 1, 0)
-        for endpoint in (self.client, self.upstream):
-            try:
-                endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
-            except OSError:
-                pass
-            try:
-                endpoint.close()
-            except OSError:
-                pass
+            self.stopped.set()
+            # Keep reset preparation atomic with serve's normal cleanup: once
+            # stopped is visible, both pumps may immediately return and join.
+            linger = struct.pack("ii", 1, 0)
+            for endpoint in (self.client, self.upstream):
+                try:
+                    endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+                except OSError:
+                    pass
+                try:
+                    endpoint.close()
+                except OSError:
+                    pass
         return True
 
     def close(self) -> None:
-        for endpoint in (self.client, self.upstream):
-            try:
-                endpoint.close()
-            except OSError:
-                pass
+        with self.lock:
+            self.stopped.set()
+            for endpoint in (self.client, self.upstream):
+                # A close in one thread need not wake another thread's blocking
+                # socket operation. Fatal errors must end both pumps before
+                # serve can join them and remove this connection from the live set.
+                try:
+                    endpoint.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    endpoint.close()
+                except OSError:
+                    pass
 
     def _pump(self, source: socket.socket, destination: socket.socket,
               direction: str) -> None:
-        # The profile is re-read once per chunk rather than snapshotted at
-        # accept, so a test can degrade a link that is already carrying an SSH
-        # session. Re-reading at a chunk boundary keeps the change observable
-        # at a well-defined point instead of part-way through a write.
+        # The profile is re-read rather than snapshotted at accept, so a test
+        # can degrade or restore a link that is already carrying an SSH
+        # session. Each received chunk fixes its propagation delay; each
+        # segment write reads the budget and segment size, so the change is
+        # observable at a well-defined point instead of part-way through a
+        # write, and restoring a link also releases bytes already queued.
         bucket = TokenBucket(0)
         jitter = None
+        pending: deque[PendingChunk] = deque()
+        pending_bytes = 0
+        ended = False
+        started = time.monotonic()
+        cpu_started = time.thread_time()
+        metrics = {
+            "connection": self.index,
+            "direction": direction,
+            "receivedChunks": 0,
+            "receivedBytes": 0,
+            "smallestChunk": 0,
+            "largestChunk": 0,
+            "peakPendingBytes": 0,
+            "scheduledLatencySeconds": 0.0,
+            "latencyWaitSeconds": 0.0,
+            "tokenWaitSeconds": 0.0,
+            "sendWaitSeconds": 0.0,
+            "deliveredBytes": 0,
+            "exitReason": "stopped",
+            "socketErrorCode": None,
+        }
 
-        while True:
-            try:
-                chunk = source.recv(RECEIVE_BYTES)
-            except OSError:
-                return
-            if not chunk:
-                try:
-                    destination.shutdown(socket.SHUT_WR)
-                except OSError:
-                    pass
-                return
-
-            profile = self.proxy.current_profile()
-            if bucket.bytes_per_second != profile.bandwidth_bytes_per_second:
-                bucket = TokenBucket(profile.bandwidth_bytes_per_second)
-            if jitter is None:
-                jitter = random.Random(profile.jitter_seed + self.index)
-            delay = profile.latency_millis
-            if profile.jitter_millis > 0:
-                delay += jitter.uniform(0, profile.jitter_millis)
-            if delay > 0:
-                time.sleep(delay / 1000)
-
-            span = profile.segment_bytes if profile.segment_bytes > 0 else len(chunk)
-            for offset in range(0, len(chunk), span):
-                segment = chunk[offset : offset + span]
-                bucket.consume(len(segment))
-                try:
-                    destination.sendall(segment)
-                except OSError:
+        try:
+            while not self.stopped.is_set():
+                if ended and not pending:
+                    try:
+                        destination.shutdown(socket.SHUT_WR)
+                    except OSError as error:
+                        metrics["exitReason"] = "shutdownError"
+                        metrics["socketErrorCode"] = error.errno
+                        self.close()
+                        return
+                    metrics["exitReason"] = "eof"
                     return
-                self.proxy.count(direction, len(segment))
+
+                now = time.monotonic()
+                wait = min(POLL_SECONDS, max(0, pending[0].ready_at - now)) if pending else POLL_SECONDS
+                readers = [source] if not ended and pending_bytes < PENDING_BYTES else []
+                waiting_for_latency = bool(pending) and pending[0].ready_at > now
+                waited_at = time.monotonic()
+                try:
+                    ready, _, _ = select.select(readers, [], [], wait)
+                except (OSError, ValueError) as error:
+                    metrics["exitReason"] = "selectError"
+                    metrics["socketErrorCode"] = getattr(error, "errno", None)
+                    self.close()
+                    return
+                if waiting_for_latency:
+                    metrics["latencyWaitSeconds"] += time.monotonic() - waited_at
+
+                if ready:
+                    try:
+                        chunk = source.recv(min(RECEIVE_BYTES, PENDING_BYTES - pending_bytes))
+                    except BlockingIOError:
+                        # Readiness can change before recv; try the selector
+                        # again without treating a transient EAGAIN as EOF.
+                        continue
+                    except OSError as error:
+                        metrics["exitReason"] = "receiveError"
+                        metrics["socketErrorCode"] = error.errno
+                        self.close()
+                        return
+                    if not chunk:
+                        ended = True
+                    else:
+                        received_at = time.monotonic()
+                        profile = self.proxy.current_profile()
+                        if jitter is None:
+                            jitter = random.Random(profile.jitter_seed + self.index)
+                        delay = profile.latency_millis
+                        if profile.jitter_millis > 0:
+                            delay += jitter.uniform(0, profile.jitter_millis)
+                        pending.append(PendingChunk(received_at + delay / 1000, chunk))
+                        pending_bytes += len(chunk)
+                        metrics["receivedChunks"] += 1
+                        metrics["receivedBytes"] += len(chunk)
+                        metrics["smallestChunk"] = min(metrics["smallestChunk"] or len(chunk), len(chunk))
+                        metrics["largestChunk"] = max(metrics["largestChunk"], len(chunk))
+                        metrics["peakPendingBytes"] = max(metrics["peakPendingBytes"], pending_bytes)
+                        metrics["scheduledLatencySeconds"] += delay / 1000
+
+                if not pending or pending[0].ready_at > time.monotonic():
+                    continue
+                delivery = pending[0]
+                chunk, offset = delivery.data, delivery.offset
+                profile = self.proxy.current_profile()
+                if bucket.bytes_per_second != profile.bandwidth_bytes_per_second:
+                    bucket = TokenBucket(profile.bandwidth_bytes_per_second)
+                span = profile.segment_bytes if profile.segment_bytes > 0 else len(chunk)
+                segment = chunk[offset : offset + span]
+                token_started = time.monotonic()
+                consumed = bucket.consume(
+                    len(segment), self.stopped,
+                    lambda: self.proxy.current_profile() is not profile)
+                metrics["tokenWaitSeconds"] += time.monotonic() - token_started
+                if not consumed:
+                    if self.stopped.is_set():
+                        return
+                    # A new profile arrived while this segment waited for
+                    # budget; plan the same bytes again under it.
+                    continue
+                send_started = time.monotonic()
+                try:
+                    sent = 0
+                    while sent < len(segment):
+                        if self.stopped.is_set():
+                            return
+                        # Nonblocking sends let cut interrupt a peer that
+                        # stopped reading without issuing a graceful shutdown
+                        # before the reset. Reserve tokens once per segment,
+                        # then account only for bytes each short write sent.
+                        try:
+                            count = destination.send(segment[sent:])
+                        except BlockingIOError:
+                            select.select([], [destination], [], POLL_SECONDS)
+                            continue
+                        if count == 0:
+                            metrics["exitReason"] = "sendZero"
+                            self.close()
+                            return
+                        sent += count
+                        metrics["deliveredBytes"] += count
+                        self.proxy.count(direction, count)
+                        pending_bytes -= count
+                        delivery.offset += count
+                except (OSError, ValueError) as error:
+                    metrics["exitReason"] = "sendError"
+                    metrics["socketErrorCode"] = getattr(error, "errno", None)
+                    self.close()
+                    return
+                finally:
+                    metrics["sendWaitSeconds"] += time.monotonic() - send_started
+                if delivery.offset == len(chunk):
+                    pending.popleft()
+        finally:
+            metrics["wallSeconds"] = time.monotonic() - started
+            metrics["cpuSeconds"] = time.thread_time() - cpu_started
+            metrics["cut"] = self.is_cut
+            print("[weak-proxy] " + json.dumps(metrics, separators=(",", ":")), flush=True)
 
 
 class Proxy:

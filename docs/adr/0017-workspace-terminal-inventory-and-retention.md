@@ -4,6 +4,20 @@ status: accepted
 
 # Workspace terminals share a bounded attach lifetime
 
+## Current routing
+
+The original Agent-only Console navigation below has been superseded by the
+Agents and Terminals lists defined in [CONTEXT.md](../../CONTEXT.md).
+`ConsoleView` exposes both lists; on iPad they share the sidebar's list switch.
+The five-terminal retention, inventory, and explicit-takeover contracts in this
+ADR remain current. Native Windows extends the channel/platform path through
+[ADR 0018](0018-native-windows-hosts.md).
+
+For implementation owners and tests, follow the
+[source map](../agents/navigation.md#connection-input-and-terminals).
+
+## Original navigation decision
+
 Issue #333 makes every Pane discoverable as a Workspace Terminal, including
 panes running Agents. Agent detail has a Workspace drawer docked to the
 terminal's trailing edge: a handle that expands in place, so navigation

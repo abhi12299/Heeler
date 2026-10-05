@@ -254,8 +254,9 @@ final class TerminalKeyboardInset {
 
     /// Freezes the app-owned keyboard inset while UIKit transfers responder
     /// ownership. All frames inside the handoff are transient by definition:
-    /// both endpoints use the same system keyboard, so retaining one would let
-    /// a candidate-row or another window's frame replace the settled height.
+    /// retaining one would let a candidate-row or another window's frame
+    /// replace the settled height. The destination's settle measures the
+    /// keyboard it actually kept; see ``endResponderHandoff(_:currentHeight:)``.
     func beginResponderHandoff(
         currentHeight: @escaping @MainActor () -> CGFloat? = { nil },
         onFallback: @escaping @MainActor (UUID) -> Void = { _ in }
@@ -320,9 +321,12 @@ final class TerminalKeyboardInset {
     }
 
     /// Releases a responder-handoff freeze after the destination terminal's
-    /// own keyboard frame settles (or its own timeout gives up). The
-    /// pre-handoff settled height stays authoritative while the keyboard is
-    /// still measured up; a later ordinary keyboard event can replace it. An
+    /// own keyboard frame settles (or its own timeout gives up). While the
+    /// keyboard is still measured up, the inset eases to that measurement:
+    /// the two endpoints can carry different correction traits (Composer
+    /// autocorrect shows a candidate bar Direct Input never does), and UIKit
+    /// published the resized frame inside the freeze, where it was dropped.
+    /// Matching endpoints measure the frozen height and nothing moves. An
     /// owed dismissal is settled against `currentHeight` otherwise.
     func endResponderHandoff(
         _ id: UUID,
@@ -358,25 +362,39 @@ final class TerminalKeyboardInset {
 
     /// Every handoff exit reconciles against the owning window. An owed
     /// dismissal is settled against the measurement; `keepsVisibleHeight`
-    /// keeps a positive frozen height while the keyboard still measures up
-    /// (the destination's settle contract). With nothing owed, a frozen zero
-    /// inset still adopts a keyboard measured up at exit: its presentation
-    /// was discarded inside the freeze (a hardware keyboard detached during
-    /// the transfer), and no later frame would restore it.
+    /// keeps a positive inset while the keyboard still measures up (the
+    /// destination's settle contract), easing it to that measurement. With
+    /// nothing owed, a frozen zero inset still adopts a keyboard measured up
+    /// at exit: its presentation was discarded inside the freeze (a hardware
+    /// keyboard detached during the transfer), and no later frame would
+    /// restore it.
     private func reconcileResponderHandoffExit(
         owesDismissal: Bool,
         measuredHeight: CGFloat?,
         keepsVisibleHeight: Bool = false
     ) {
+        if keepsVisibleHeight, let measuredHeight, measuredHeight > 0, height > 0 {
+            adoptSettledKeyboardHeight(measuredHeight)
+            return
+        }
         if owesDismissal {
-            if keepsVisibleHeight, let measuredHeight, measuredHeight > 0, height > 0 {
-                return
-            }
             settleDismissal(measuredHeight: measuredHeight)
         } else if height == 0, let measuredHeight, measuredHeight > 0 {
             settleDismissal(measuredHeight: measuredHeight)
         }
     }
+
+    /// Moves a visible inset to the keyboard the destination settled on.
+    /// The keyboard itself already changed height; easing the inset closes
+    /// (or opens) the difference instead of snapping the input chrome.
+    private func adoptSettledKeyboardHeight(_ measuredHeight: CGFloat) {
+        guard abs(measuredHeight - height) > 1 else { return }
+        withAnimation(Self.settledHeightAnimation) {
+            apply(measuredHeight)
+        }
+    }
+
+    private static let settledHeightAnimation = Animation.easeOut(duration: 0.25)
 
     /// Commits an owed dismissal. A measurement is authoritative; without
     /// one (no owning window) the frozen height stands, and a zero height

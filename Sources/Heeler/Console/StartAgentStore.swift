@@ -179,7 +179,7 @@ final class StartAgentStore {
     /// Selecting a directory switches the draft destination without starting
     /// an Agent. Dismissing the browser never changes the current selection.
     func applyBrowsedDirectory(_ path: String) {
-        guard offersNewWorkspace, RemoteShellPath.isQuotableAbsolute(path) else { return }
+        guard offersNewWorkspace, RemoteHostPath.isAbsolute(path) else { return }
         newWorkspaceDirectory = path
         selectNewWorkspace()
     }
@@ -505,7 +505,7 @@ final class StartAgentStore {
                     state = .editing
                     return
                 }
-                guard RemoteShellPath.isQuotableAbsolute(home) else {
+                guard RemoteHostPath.isAbsolute(home) else {
                     state = .failed(
                         "The Host's home directory is not a usable path: \(home)")
                     return

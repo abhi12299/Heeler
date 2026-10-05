@@ -110,7 +110,7 @@ final class NewTerminalStore {
     }
 
     func applyBrowsedDirectory(_ path: String) {
-        guard RemoteShellPath.isQuotableAbsolute(path) else { return }
+        guard RemoteHostPath.isAbsolute(path) else { return }
         newWorkspaceDirectory = path
         target = .newWorkspace
     }
@@ -169,7 +169,7 @@ final class NewTerminalStore {
         } catch {
             throw SubmitFailure(message: StartAgentStore.homeProbeMessage(for: error))
         }
-        guard RemoteShellPath.isQuotableAbsolute(home) else {
+        guard RemoteHostPath.isAbsolute(home) else {
             throw SubmitFailure(message: "The Host's home directory is not a usable path: \(home)")
         }
         return home

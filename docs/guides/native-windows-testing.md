@@ -1,0 +1,437 @@
+# Native Windows host testing
+
+Use this checklist to validate the manual SSH connection work for
+[#399](https://github.com/ZingerLittleBee/Heeler/issues/399) on Windows 11.
+Run it against the Heeler build containing that change. These are acceptance
+steps, not a record of a completed Windows test.
+
+The connection under test uses native Windows OpenSSH and native herdr.
+Windows environment discovery must resolve the account's home and herdr's
+configuration directory, including `%APPDATA%`. API traffic must use herdr's
+official `remote-api-bridge`; terminal input and output must use
+`terminal session control`. The phone must not need WSL, a Unix socket forward,
+or an additional bridge service.
+
+## 1. Record the Windows environment
+
+Use the same Windows account for SSH and the herdr session. In a normal
+PowerShell window, run:
+
+```powershell
+herdr --version
+(Get-Command herdr).Source
+$PSVersionTable.PSVersion
+$env:USERPROFILE
+$env:APPDATA
+Get-Service sshd
+Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue
+herdr session list --json
+```
+
+Start with herdr **0.9.3** and OpenSSH `DefaultShell` set to **PowerShell 7**,
+matching the reported environment. Heeler also supports cmd as the OpenSSH
+default shell; normal setup does not require a shell change.
+
+Save the Heeler version/build number, Windows version, herdr version, shell
+path, and session-list output with your results. Check that `herdr.exe` is
+the native Windows binary.
+The source references in this guide are pinned to herdr 0.9.3 commit
+`7b116c05bfda646af39d2524c54e70c751f57ee8`.
+
+OpenSSH must already accept this account from another machine on the same
+network or VPN. For installation and firewall setup, follow
+[Microsoft's OpenSSH setup guide](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse).
+
+From another machine, verify noninteractive SSH commands as well as an
+interactive login:
+
+```sh
+ssh -p 22 <user>@<windows-address> "herdr --version"
+ssh -p 22 <user>@<windows-address> "herdr session list --json"
+```
+
+Use your actual SSH port. A working local terminal does not prove that sshd
+can find the same herdr executable. Resolve any `herdr`-not-found error here
+before testing Heeler.
+
+## 2. Prepare an isolated named session
+
+You can use an existing session. For a separate test session, run this in a
+native Windows terminal and leave the session running:
+
+```powershell
+herdr --session heeler-win-test
+```
+
+In another PowerShell window, run:
+
+```powershell
+herdr session list --json
+herdr --session heeler-win-test agent list
+herdr --session heeler-win-test pane list
+herdr remote-api-bridge --check
+```
+
+Start one of your already configured agents in the test session from the
+Windows herdr UI. Use a trusted project directory so the agent does not stop
+at a first-use trust dialog. Keep at least one ordinary shell pane available
+for the input tests.
+
+Native Windows herdr resolves its configuration directory from
+`XDG_CONFIG_HOME`, then `APPDATA`, then `USERPROFILE\AppData\Roaming`, with
+additional fallbacks. Its displayed `.sock` paths identify local IPC endpoints;
+the app must use the official bridge to reach them. See the
+[herdr 0.9.3 configuration code](https://github.com/herdrdev/herdr/blob/7b116c05bfda646af39d2524c54e70c751f57ee8/src/config/io.rs).
+
+### Bridge smoke test
+
+`remote-api-bridge --check` must print `herdr-api-bridge-v1`. To verify an
+actual request, run the following in PowerShell. It keeps stdin open until
+the response arrives and bounds the read to 15 seconds:
+
+```powershell
+$HeelerBridge = New-Object System.Diagnostics.Process
+$HeelerBridge.StartInfo.FileName = (Get-Command herdr.exe).Source
+$HeelerBridge.StartInfo.Arguments = '--session heeler-win-test remote-api-bridge'
+$HeelerBridge.StartInfo.UseShellExecute = $false
+$HeelerBridge.StartInfo.RedirectStandardInput = $true
+$HeelerBridge.StartInfo.RedirectStandardOutput = $true
+$HeelerBridge.StartInfo.RedirectStandardError = $true
+[void]$HeelerBridge.Start()
+$HeelerBridgeErrors = $HeelerBridge.StandardError.ReadToEndAsync()
+try {
+    $HeelerBridge.StandardInput.WriteLine('{"id":"windows-smoke","method":"ping","params":{}}')
+    $HeelerBridge.StandardInput.Flush()
+    $HeelerBridgeResponse = $HeelerBridge.StandardOutput.ReadLineAsync()
+    if (-not $HeelerBridgeResponse.Wait(15000)) { throw 'Bridge ping timed out' }
+    $HeelerBridgeResponse.Result
+} finally {
+    $HeelerBridge.StandardInput.Close()
+    if (-not $HeelerBridge.WaitForExit(3000)) { $HeelerBridge.Kill() }
+    $HeelerBridge.WaitForExit()
+    $HeelerBridgeErrors.Result
+    $HeelerBridge.Dispose()
+}
+```
+
+Expected: one JSON response with `id: "windows-smoke"` and a `result`
+containing the server version and protocol. Record an `error` response or
+timeout. Use a fresh process for each ordinary API request.
+
+Do not test with a pipeline that immediately closes stdin after the request:
+the Windows bridge ends its output loop on stdin EOF and can exit before
+printing the response. Session selection uses top-level `--session` or
+`HERDR_SOCKET_PATH`; `remote-api-bridge` has no `--socket` option. See the
+[official bridge arguments](https://github.com/herdrdev/herdr/blob/7b116c05bfda646af39d2524c54e70c751f57ee8/src/remote.rs#L15-L39)
+and [Windows bridge lifecycle](https://github.com/herdrdev/herdr/blob/7b116c05bfda646af39d2524c54e70c751f57ee8/src/platform/windows.rs#L70-L101).
+
+## 3. Test manual password authentication
+
+1. In Heeler, open **Add Host** and enter the Windows address, SSH port, and
+   SSH username.
+2. Select **Password** and enter the account password. Leave **Session name**
+   blank to test the default session first, if you have one running.
+3. Save. Compare the first-connection SSH host key fingerprint with the key
+   on Windows before trusting it.
+4. Run the preflight checks. The remote environment step must pass without
+   `The remote home directory could not be resolved`.
+5. Select `heeler-win-test` from the discovered sessions, or enter that exact
+   name in **Edit Host > Session name** and reconnect.
+6. Confirm that Console shows that session's workspaces and agents. A newer
+   protocol advisory may appear; it must not reject an otherwise compatible
+   server.
+
+To inspect the default Windows Ed25519 host key fingerprint:
+
+```powershell
+ssh-keygen -lf "$env:ProgramData\ssh\ssh_host_ed25519_key.pub"
+```
+
+Use the host key type shown by Heeler if the server negotiated another type.
+Windows OpenSSH stores default host keys under `%ProgramData%\ssh`; see
+[Microsoft's server configuration reference](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration#hostkey).
+
+Expected result: authentication, Windows environment discovery, session
+selection, API preflight, and the initial agent snapshot all succeed.
+
+### PowerShell profile output
+
+Repeat the connection while the SSH account's PowerShell 7 profile prints a
+short startup banner to stdout. If the profile already prints output, use
+that. Otherwise, save a copy of the applicable profile, temporarily add
+`Write-Output 'heeler-profile-banner'`, and restore the profile after this
+check. Confirm that the noninteractive SSH command from step 1 prints the
+banner before testing the app.
+
+Expected: preflight, session discovery, API responses, and terminal frames
+still parse correctly. Startup text must not become a home path, a JSON
+response, or remote terminal content.
+
+## 4. Test Device Key authentication
+
+1. In **Edit Host**, select **Device Key** and press **Copy authorized_keys
+   Line**. Transfer only that public line to Windows.
+2. Append the line to the authorized-keys file that your sshd configuration
+   actually uses. Preserve the existing keys.
+3. Save the Host and reconnect. The same named session must load without a
+   password.
+
+Under the default Windows OpenSSH configuration:
+
+- A standard account uses `%USERPROFILE%\.ssh\authorized_keys`.
+- An account in the Administrators group uses
+  `%ProgramData%\ssh\administrators_authorized_keys` instead. Adding its key
+  to the profile file alone does not authorize that account.
+
+For an administrator account, run this from an elevated PowerShell window.
+Replace the sample value with the complete public line copied from Heeler:
+
+```powershell
+$HeelerPublicKey = 'ssh-ed25519 <public-key-blob> heeler'
+$HeelerKeysPath = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+Add-Content -LiteralPath $HeelerKeysPath -Value $HeelerPublicKey -Encoding ascii
+icacls.exe $HeelerKeysPath /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F'
+```
+
+The SIDs make the ACL command work on localized Windows installations. Check
+the resulting ACL and remove any unrelated explicit access entries before
+using the file. For a standard account or custom `AuthorizedKeysFile`, follow
+[Microsoft's key-management guide](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_keymanagement#deploying-the-public-key).
+
+Repeat with **RSA Key** if you use that authentication method. Windows SSH
+keys must be registered manually in this test; the pairing plugin does not
+perform enrollment on Windows.
+
+## 5. Verify API updates and session isolation
+
+With Heeler connected to `heeler-win-test`:
+
+1. Rename a test workspace or tab in Windows herdr. Confirm the new label
+   appears on the phone without removing and adding the Host.
+2. Start an agent, send a short prompt, and wait for it to finish. Confirm the
+   Console updates through the agent's working and completion states.
+3. Create and close a disposable agent or tab. Confirm it appears and then
+   disappears from Heeler.
+4. Connect Heeler to a different running named session. Confirm it displays
+   that session's content, then switch back and confirm no content leaked
+   between sessions.
+5. Put the app in the background, bring it back, and use **Reconnect**. Confirm
+   the current snapshot loads and later changes still arrive.
+6. Enable Live Activities in Heeler and keep the app in the foreground.
+   Start and finish an agent prompt. Confirm the Host's Live Activity reflects
+   the current eligible-agent counts and states. Foreground updates use the
+   app's API events and do not require the Windows pairing plugin. This check
+   does not cover background push updates or Agent Notifications.
+
+Expected result: requests and the long-lived event subscription reach the
+selected Windows session through `remote-api-bridge`. A successful `ping`
+alone does not establish that subscription updates work.
+
+### Inherited client socket override
+
+Check that a legacy `HERDR_CLIENT_SOCKET_PATH` in the SSH shell cannot send
+terminal control to a different session from the API. Start a second native
+session in another Windows terminal:
+
+```powershell
+herdr --session heeler-win-other
+```
+
+Give the two sessions different workspace or tab labels in the Windows UI.
+In an ordinary shell pane in each, print a distinct marker such as
+`Write-Output 'heeler-session-A'` and `Write-Output 'heeler-session-B'`.
+
+For the PowerShell 7 `DefaultShell` run, use the SSH account's local PowerShell
+7 window to temporarily set the override in its applicable startup profile.
+The following uses `CurrentUserAllHosts`, saves its original bytes, and restores
+them when you finish. Keep this window open at the prompt while testing:
+
+```powershell
+$HeelerLegacySession = (herdr session list --json | ConvertFrom-Json).sessions |
+    Where-Object { $_.name -eq 'heeler-win-other' -and $_.running } |
+    Select-Object -First 1
+if (-not $HeelerLegacySession) { throw 'Start heeler-win-other first' }
+$HeelerLegacyClient = Join-Path $HeelerLegacySession.session_dir 'herdr-client.sock'
+$HeelerProfilePath = $PROFILE.CurrentUserAllHosts
+$HeelerProfileExisted = Test-Path -LiteralPath $HeelerProfilePath
+$HeelerProfileBytes = if ($HeelerProfileExisted) {
+    ,([System.IO.File]::ReadAllBytes($HeelerProfilePath))
+} else { $null }
+$HeelerProfileText = if ($HeelerProfileExisted) {
+    [System.IO.File]::ReadAllText($HeelerProfilePath)
+} else { '' }
+$HeelerProfileDirectory = Split-Path -Parent $HeelerProfilePath
+$HeelerProfileDirectoryExisted = Test-Path -LiteralPath $HeelerProfileDirectory
+try {
+    [void][System.IO.Directory]::CreateDirectory($HeelerProfileDirectory)
+    $HeelerOverrideLine = "`n`$env:HERDR_CLIENT_SOCKET_PATH = '" +
+        $HeelerLegacyClient.Replace("'", "''") + "'`n"
+    [System.IO.File]::WriteAllText($HeelerProfilePath,
+        $HeelerProfileText + $HeelerOverrideLine,
+        [System.Text.UTF8Encoding]::new($false))
+    $HeelerProbeScript = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false); " +
+        "[Console]::WriteLine('__HEELER_LEGACY_CLIENT__=' + `$env:HERDR_CLIENT_SOCKET_PATH)"
+    $HeelerProbeEncoded = [Convert]::ToBase64String(
+        [System.Text.Encoding]::Unicode.GetBytes($HeelerProbeScript))
+    Write-Output "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand $HeelerProbeEncoded"
+    [void](Read-Host 'Run the fresh SSH probe and Heeler checks, then press Enter to restore the profile')
+} finally {
+    if ($HeelerProfileExisted) {
+        [System.IO.File]::WriteAllBytes($HeelerProfilePath, $HeelerProfileBytes)
+    } else {
+        Remove-Item -LiteralPath $HeelerProfilePath -ErrorAction SilentlyContinue
+    }
+    if (-not $HeelerProfileDirectoryExisted -and
+        -not (Get-ChildItem -LiteralPath $HeelerProfileDirectory -Force)) {
+        Remove-Item -LiteralPath $HeelerProfileDirectory
+    }
+}
+```
+
+From another machine, run a **fresh, non-PTY** SSH command with the printed
+`powershell.exe ... -EncodedCommand ...` command:
+
+```sh
+ssh -T -p 22 <user>@<windows-address> "<paste-the-generated-command>"
+```
+
+The `__HEELER_LEGACY_CLIENT__=` line must contain the client path for
+`heeler-win-other`. An empty or different value means this setup did not
+inject the override into the SSH process, so mark this check **not tested**.
+Do not count a local `$env` value as proof of SSH inheritance. For a cmd
+`DefaultShell` run, use an override already inherited by that account's SSH
+process, if available, and apply the same probe requirement.
+
+After the probe confirms the override, reconnect Heeler to `heeler-win-test`.
+Confirm that both its Console labels and terminal's `heeler-session-A` marker
+belong to that session. Type `Write-Output 'heeler-selected-session-input'`
+on the phone and confirm it appears only in that session's Windows pane.
+Switch to `heeler-win-other`, repeat with another marker, and switch back.
+If a default session is running, repeat with **Session name** blank while the
+override still points to `heeler-win-other`.
+
+Expected: API snapshots, event updates, terminal output, and terminal input
+all follow the selected session; no other session receives the input. Finish
+the prompt to restore the prior profile, then reconnect and recheck the SSH
+probe against the account's original environment. See herdr's
+[client socket precedence](https://github.com/herdrdev/herdr/blob/7b116c05bfda646af39d2524c54e70c751f57ee8/src/server/socket_paths.rs#L15-L49).
+
+## 6. Verify live terminal input and rendering
+
+Open the test agent's terminal in Heeler, then test an ordinary shell pane.
+
+1. Confirm that the existing screen is rendered and new output appears.
+2. In the shell, type a harmless command and submit it. For PowerShell:
+
+   ```powershell
+   Write-Output 'heeler-windows-input-ok'
+   ```
+
+   For cmd:
+
+   ```bat
+   echo heeler-windows-input-ok
+   ```
+
+3. Confirm the command runs once and its output is visible on both Windows
+   and Heeler. Test Enter, Backspace, arrow keys, and Ctrl+C at an idle shell.
+4. Repeat with Chinese text and an emoji, for example
+   `Write-Output '你好 Heeler 🐾'` in PowerShell or `echo 你好 Heeler 🐾` in cmd.
+   Confirm input and output preserve the characters without replacement
+   symbols or repeated bytes. Paste a harmless multiline block with distinct
+   line markers and confirm that each line reaches the shell or agent once,
+   preserving its line breaks and Unicode text.
+5. In the agent terminal, send a short prompt and confirm it receives the
+   text once. For an agent that supports terminal mouse input, scroll up and
+   down on the phone. Confirm its own viewport moves and then returns to the
+   latest output. Do not count an idle shell's local scrollback as proof of
+   remote mouse scrolling.
+6. Rotate the phone and show/hide its keyboard. Output must remain readable
+   and the remote viewport must resize without corrupting the screen.
+7. Leave the terminal and reopen it several times. Confirm input still works
+   and the app does not remain stuck on a displaced controller.
+8. If another client already controls the terminal, exercise the app's
+   takeover flow, then reconnect from the other client. Confirm each client
+   reports lost ownership or regains control as expected.
+
+Expected result: the native Windows path works through
+`herdr terminal session control`, whose streams carry JSON terminal frames
+and input commands. Native `herdr terminal attach` is a separate command and
+is unsupported on Windows. See the
+[control protocol implementation](https://github.com/herdrdev/herdr/blob/7b116c05bfda646af39d2524c54e70c751f57ee8/src/client/terminal_sessions.rs#L17-L215)
+and [native Windows limitations](https://github.com/herdrdev/herdr/blob/7b116c05bfda646af39d2524c54e70c751f57ee8/docs/next/website/src/content/docs/windows-beta.mdx).
+
+## 7. Repeat with cmd as OpenSSH DefaultShell
+
+After the PowerShell 7 run passes, repeat the password and Device Key tests,
+session selection, event updates, and terminal checks with cmd as the SSH
+default shell. This change affects every new SSH connection to the machine;
+keep a local elevated PowerShell window available and restore the original
+value afterward.
+
+Inspect and save the original `DefaultShell` registry value first. Configure
+cmd using the steps in
+[Microsoft's default-shell reference](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration#configuring-the-default-shell-for-openssh-in-windows),
+restart sshd, and create a fresh Heeler connection. Do not rely on an existing
+SSH connection to exercise the new shell.
+
+Expected result: Windows discovery and the bridge commands work regardless
+of whether the SSH account shell is PowerShell 7 or cmd.
+
+## 8. Keep a macOS or Linux comparison
+
+On a macOS or Linux Host, prepare a separate session with the same name,
+`heeler-win-test`, and add that Host to the same Heeler build. Repeat preflight,
+session selection, API updates, terminal input, resize, and reconnect. Use a
+shell-appropriate harmless command such as `printf 'heeler-unix-input-ok\n'`.
+Keep each Host's results separate even though the session names match.
+
+Expected: the Unix Host continues to use its existing direct-streamlocal API
+and PTY terminal path. Selecting the Windows Host must not change the Unix
+Host's connection behavior or mix the two Hosts' snapshots.
+
+## Scope and results
+
+The acceptance scope is manual SSH access to existing native Windows herdr
+sessions, API/event synchronization, live terminal control, and foreground
+Live Activity synchronization.
+
+The Windows pairing plugin, its Bootstrap Key forced command, and automatic
+Device Key enrollment are excluded. The plugin manifest still excludes
+Windows, so `heeler.pair` returning `platform_unsupported` is not a failure of
+the manual connection path.
+
+Changes, Skills, uploads/file staging, and notification registration are
+explicitly unavailable on Windows in this implementation. Their app guards
+must return an unavailable result instead of running POSIX remote scripts or
+writing unsupported remote files. Agent Notifications and background Live
+Activity push updates are unsupported because the Windows plugin is excluded.
+Foreground Live Activity updates remain in scope through API events.
+
+As a final boundary check, try each unavailable feature and record its app
+message. It must fail promptly without disconnecting the Host or preventing
+later Console refreshes and terminal input.
+
+Record each result separately:
+
+| Check | PowerShell 7 | cmd | macOS/Linux | Failure detail |
+| --- | --- | --- | --- | --- |
+| Password authentication and preflight | | | | |
+| Device Key authentication | | | | |
+| PowerShell startup banner | | N/A | N/A | |
+| Named-session selection and isolation | | | | |
+| Inherited client socket override isolation | | | N/A | |
+| Initial workspace/agent snapshot | | | | |
+| Event updates after connect/reconnect | | | | |
+| Foreground Live Activity updates | | | | |
+| Agent terminal output and input | | | | |
+| Shell terminal output and input | | | | |
+| Chinese/emoji and multiline paste | | | | |
+| Remote mouse scrolling | | | | |
+| Terminal resize and controller takeover | | | | |
+| Windows unavailable-feature guards | | | N/A | |
+
+For a failure, include the exact Heeler message, affected session name,
+authentication method, and the command output from step 1. Note whether
+ordinary noninteractive SSH commands still work. Omit passwords, private
+keys, notification keys, and pairing-code seeds from the report.

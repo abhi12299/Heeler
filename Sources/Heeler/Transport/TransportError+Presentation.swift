@@ -31,6 +31,10 @@ struct TransportErrorPresentation: Equatable, Sendable {
 extension TransportError {
     var presentation: TransportErrorPresentation {
         switch self {
+        case .hostFeatureUnavailable(let feature):
+            TransportErrorPresentation(
+                summary: "This feature is unavailable on the Host", detail: feature,
+                recoverySuggestion: nil)
         case .sshUnreachable(let detail):
             TransportErrorPresentation(
                 summary: "SSH unavailable",
@@ -93,9 +97,7 @@ extension TransportError {
                 summary: "herdr is not on this Host's SSH PATH",
                 detail: nil,
                 recoverySuggestion:
-                    "Homebrew installs are often at /opt/homebrew/bin or /home/linuxbrew/.linuxbrew/bin — "
-                    + "put that directory on the account's non-interactive PATH, "
-                    + "or symlink herdr into ~/.local/bin.")
+                    "Put herdr's install directory on the account's non-interactive SSH PATH.")
         case .streamLocalOpenFailed:
             TransportErrorPresentation(
                 summary: "herdr is not running on this Host",
@@ -169,6 +171,8 @@ extension TransportError {
         _ underlying: TransportError
     ) -> TransportErrorPresentation {
         switch underlying {
+        case .hostFeatureUnavailable:
+            underlying.presentation
         case .jumpHostFailed:
             underlying.presentation
         case .sshUnreachable(let detail):

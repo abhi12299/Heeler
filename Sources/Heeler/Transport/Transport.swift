@@ -721,6 +721,108 @@ enum RemoteShellPath {
     }
 }
 
+/// Absolute paths in a Host's filesystem, independent of the iOS filesystem.
+/// Windows drive and UNC paths travel as literal values; POSIX paths retain
+/// the existing conservative login-shell quoting policy.
+enum RemoteHostPath {
+    static func isAbsolute(_ path: String) -> Bool {
+        if windowsRoot(of: path) != nil { return isSafeWindowsPath(path) }
+        return RemoteShellPath.isQuotableAbsolute(path)
+    }
+
+    static func isWindowsAbsolute(_ path: String) -> Bool {
+        windowsRoot(of: path) != nil && isSafeWindowsPath(path)
+    }
+
+    static func childPath(_ parent: String, name: String) -> String {
+        let separator = windowsRoot(of: parent)?.separator ?? "/"
+        if let last = parent.last, isSeparator(last, windows: windowsRoot(of: parent) != nil) {
+            return parent + name
+        }
+        return parent + String(separator) + name
+    }
+
+    static func parentPath(of path: String) -> String? {
+        guard isAbsolute(path) else { return nil }
+        guard let root = windowsRoot(of: path) else {
+            guard path != "/" else { return nil }
+            let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
+            guard trimmed != "/", !trimmed.isEmpty else { return nil }
+            let parent = (trimmed as NSString).deletingLastPathComponent
+            return parent.isEmpty ? "/" : parent
+        }
+        let trimmed = trimmingSeparators(in: path, after: root.end, windows: true)
+        guard trimmed.endIndex > root.end else { return nil }
+        guard let separator = trimmed.lastIndex(where: { isSeparator($0, windows: true) }) else {
+            return nil
+        }
+        let end = max(separator, root.end)
+        return String(path[..<end])
+    }
+
+    /// A folder label that recognizes the Host's separators rather than the
+    /// local device's POSIX path conventions. Roots keep their useful name.
+    static func lastComponent(of path: String) -> String {
+        let root = windowsRoot(of: path)
+        let rootEnd = root?.end ?? (path.hasPrefix("/") ? path.index(after: path.startIndex) : path.startIndex)
+        let trimmed = trimmingSeparators(in: path, after: rootEnd, windows: root != nil)
+        if trimmed.endIndex == rootEnd { return String(trimmed) }
+        return trimmed.split(whereSeparator: { isSeparator($0, windows: root != nil) })
+            .last.map(String.init) ?? path
+    }
+
+    private struct WindowsRoot {
+        let end: String.Index
+        let separator: Character
+    }
+
+    private static func windowsRoot(of path: String) -> WindowsRoot? {
+        let prefix = Array(path.prefix(3))
+        if prefix.count == 3,
+            prefix[0].asciiValue.map({ (0x41...0x5A).contains($0) || (0x61...0x7A).contains($0) }) == true,
+            prefix[1] == ":", isSeparator(prefix[2], windows: true)
+        {
+            return WindowsRoot(end: path.index(path.startIndex, offsetBy: 3), separator: prefix[2])
+        }
+        // UNC paths stop at the share root. Device namespaces are deliberately
+        // excluded, so Back cannot turn a filesystem path into a device path.
+        guard path.hasPrefix("\\\\") else { return nil }
+        let serverStart = path.index(path.startIndex, offsetBy: 2)
+        guard let serverEnd = path[serverStart...].firstIndex(where: { isSeparator($0, windows: true) }),
+            serverEnd > serverStart
+        else { return nil }
+        let server = path[serverStart..<serverEnd]
+        guard server != ".", server != "..", server != "?" else { return nil }
+        let shareStart = path.index(after: serverEnd)
+        let shareEnd = path[shareStart...].firstIndex(where: { isSeparator($0, windows: true) }) ?? path.endIndex
+        let share = path[shareStart..<shareEnd]
+        guard !share.isEmpty, share != ".", share != ".." else { return nil }
+        return WindowsRoot(end: shareEnd, separator: "\\")
+    }
+
+    private static func isSafeWindowsPath(_ path: String) -> Bool {
+        path.unicodeScalars.allSatisfy {
+            $0.value >= 0x20 && $0.value != 0x7F && $0.value != 0x27 && $0.value != 0x22
+        }
+    }
+
+    private static func isSeparator(_ character: Character, windows: Bool) -> Bool {
+        character == "/" || (windows && character == "\\")
+    }
+
+    private static func trimmingSeparators(
+        in path: String, after rootEnd: String.Index, windows: Bool
+    ) -> Substring {
+        var end = path.endIndex
+        while end > rootEnd {
+            let previous = path.index(before: end)
+            guard isSeparator(path[previous], windows: windows) else { break }
+            end = previous
+        }
+        return path[..<end]
+    }
+}
+
 /// Directories-only listing of one remote directory, for the remote
 /// directory browser (#280). Names are sorted; `truncated` reports that more
 /// directories exist than fit in the surfaced cap.
@@ -969,6 +1071,7 @@ indirect enum TransportError: Error, Sendable, Equatable {
     /// The channel failed outside the known failure shapes; carries the
     /// underlying description for diagnostics.
     case channelFailed(detail: String)
+    case hostFeatureUnavailable(feature: String)
 
     /// Whether reconnecting without user intervention can plausibly recover.
     /// Configuration, trust, authentication, and protocol failures instead
@@ -987,7 +1090,7 @@ indirect enum TransportError: Error, Sendable, Equatable {
             .deviceKeyCorrupt, .rsaKeyCorrupt, .rsaSignatureUnsupported,
             .hostKeyRejected, .hostKeyMismatch,
             .socketNotFound, .herdrBinaryNotFound, .protocolVersionMismatch,
-            .streamLocalOpenFailed, .gitTimedOut,
+            .streamLocalOpenFailed, .gitTimedOut, .hostFeatureUnavailable,
             .homeDirectoryUnresolvable, .invalidDirectoryPath,
             .eventsChannelAlreadyOpen,
             .terminalChannelAlreadyOpen, .malformedResponse:

@@ -81,17 +81,13 @@ final class RemoteDirectoryBrowser: Identifiable {
 
     /// The child path for entering `name` under `parent`.
     static func childPath(_ parent: String, name: String) -> String {
-        parent == "/" ? "/\(name)" : "\(parent)/\(name)"
+        RemoteHostPath.childPath(parent, name: name)
     }
 
     /// The parent of an absolute path, or nil for the filesystem root (and
     /// for anything that is not a usable absolute path).
     static func parentPath(of path: String) -> String? {
-        guard path.hasPrefix("/"), path != "/" else { return nil }
-        let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
-        guard trimmed != "/", !trimmed.isEmpty else { return nil }
-        let parent = (trimmed as NSString).deletingLastPathComponent
-        return parent.isEmpty ? "/" : parent
+        RemoteHostPath.parentPath(of: path)
     }
 
     private func load(path: String?) {

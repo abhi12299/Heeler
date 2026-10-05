@@ -21,9 +21,24 @@ protocol HeelerSSHAttachChannel: Sendable {
     func read(maximumBytes: Int, timeout: Duration) async throws -> Data?
     func resize(columns: Int, rows: Int, timeout: Duration) async throws
     func exitStatus(timeout: Duration) async throws -> Int32
+    func close(timeout: Duration) async throws
+}
+
+extension HeelerSSHAttachChannel {
+    func close(timeout: Duration) async throws {}
 }
 
 extension SSHPTYChannel: HeelerSSHAttachChannel {}
+
+private protocol HeelerSSHAPIChannel: Sendable {
+    func write(_ data: Data, timeout: Duration) async throws
+    func read(maximumBytes: Int, timeout: Duration) async throws -> Data?
+    func close(timeout: Duration) async throws
+}
+
+extension SSHStreamLocalChannel: HeelerSSHAPIChannel {}
+extension SSHExecChannel: HeelerSSHAPIChannel {}
+extension BootstrappedExecChannel: HeelerSSHAPIChannel {}
 
 private final class HeelerSSHAttachPumpCancellation: Sendable {
     private let flushWithheld = Mutex(false)
@@ -274,9 +289,9 @@ struct GitExecResult: Sendable, Equatable {
     let exitStatus: Int32
 }
 
-/// The libssh2-backed app Transport. Ordinary herdr RPCs use fresh
-/// direct-streamlocal channels, Events owns one reserved forwarding channel,
-/// and Attach owns one reserved PTY exec channel per Host (ADR 0011).
+/// The libssh2-backed app Transport. Unix API traffic uses direct-streamlocal
+/// and terminals use PTY exec. Native Windows uses official API and terminal
+/// controller exec streams with a shared session-channel budget (ADR 0018).
 actor HeelerSSHTransport: Transport {
     /// Lowest herdr protocol this build can drive. Below it, methods this app
     /// calls may genuinely be absent, so the Host is refused.
@@ -317,7 +332,9 @@ actor HeelerSSHTransport: Transport {
     private let pluginListCommand: String
     private let notificationConfigDirCommand: String
     private let channelAdmission: SSHChannelAdmission
-    private let homeDirectory = SharedAsyncOperation<String>(cachesSuccess: true)
+    private let environment = SharedAsyncOperation<RemoteHostEnvironment>(cachesSuccess: true)
+    private let windowsBridgeCheck = SharedAsyncOperation<Void>(cachesSuccess: true)
+    private var detectedWindows = false
     private let notificationConfigDirectory = SharedAsyncOperation<String>(cachesSuccess: true)
     private let wake = SharedAsyncOperation<Void>(cachesSuccess: false)
     private var connected = true
@@ -647,6 +664,7 @@ actor HeelerSSHTransport: Transport {
     }
 
     func listSkills(_ query: SkillListQuery) async throws -> [AgentSkill] {
+        try await requirePOSIXHost(feature: "Skills")
         let sources = SkillSourceCatalog.sources(for: query.kind)
         guard !sources.isEmpty else { return [] }
         let home = try await remoteHomeDirectory()
@@ -674,6 +692,7 @@ actor HeelerSSHTransport: Transport {
     }
 
     func readSkillFile(atPath path: String) async throws -> String {
+        try await requirePOSIXHost(feature: "Skills")
         guard let quoted = RemoteShellPath.quotedAbsolute(path) else {
             throw TransportError.channelFailed(detail: "skill path is not quotable")
         }
@@ -695,6 +714,7 @@ actor HeelerSSHTransport: Transport {
     /// 127) is an answer of "unknown", not a failure: the strip shows the
     /// figure without its window, as it does for a model omp does not list.
     func modelContextWindow(selector: String) async throws -> Int? {
+        if isWindowsHost { return nil }
         guard let command = AgentModelProbe.command(selector: selector) else { return nil }
         let result = try await withRequestDeadline {
             try await self.runExec(Self.cLocaleCommand(command))
@@ -1397,6 +1417,16 @@ actor HeelerSSHTransport: Transport {
         await channelAdmission.snapshot().ordinarySession
     }
 
+    func oneShotChannelCountForTesting() async -> Int {
+        await connection.oneShotRegistryCountForTesting()
+    }
+
+    func runNextStreamLocalTimeoutHookForTesting(
+        _ hook: @escaping @Sendable () async throws -> Void
+    ) async {
+        await connection.runNextStreamLocalTimeoutHookForTesting(hook)
+    }
+
     func delayNextNotificationSFTPWriteForTesting(_ delay: Duration) async {
         await connection.delayNextSFTPWriteForTesting(delay)
     }
@@ -1445,10 +1475,8 @@ actor HeelerSSHTransport: Transport {
     }
 #endif
 
-    /// Directories-only listing of one absolute quotable remote path, for
-    /// the remote directory browser (#280). Paths that cannot be passed to
-    /// the Host's login shell throw `TransportError.invalidDirectoryPath`
-    /// before any channel opens.
+    /// Directories-only SFTP listing of one absolute Host filesystem path.
+    /// Invalid paths fail before any channel opens.
     func listDirectories(at path: String) async throws -> RemoteDirectoryListing {
         guard Self.validatedDirectoryPath(path) != nil else {
             throw TransportError.invalidDirectoryPath(path: path)
@@ -1470,19 +1498,18 @@ actor HeelerSSHTransport: Transport {
         }
     }
 
-    /// The path when it is absolute and quotable for the Host's login
-    /// shell, nil otherwise. `RemoteShellPath` refuses empty and relative
-    /// paths plus quote, backslash, and control characters; NUL (`\0`)
-    /// arrives as a control character and is refused the same way.
+    /// A validated absolute POSIX, Windows drive, or UNC path, otherwise nil.
+    /// Host filesystem syntax is independent of the device's filesystem.
     static func validatedDirectoryPath(_ path: String) -> String? {
-        guard !path.isEmpty, RemoteShellPath.isQuotableAbsolute(path) else {
+        guard !path.isEmpty, RemoteHostPath.isAbsolute(path) else {
             return nil
         }
         return path
     }
 
     private func notificationPluginConfigDirectory() async throws -> String {
-        try await notificationConfigDirectory.value {
+        try await requirePOSIXHost(feature: "Plugin configuration and notification registration")
+        return try await notificationConfigDirectory.value {
             try await self.resolveNotificationConfigDirectory()
         }
     }
@@ -1671,6 +1698,7 @@ actor HeelerSSHTransport: Transport {
         _ source: StagingSource,
         progress: @escaping @Sendable (AttachmentStageProgress) async -> Void
     ) async throws -> String {
+        try await requirePOSIXHost(feature: "File and image uploads")
         guard connected, await connection.isConnected else {
             throw AttachmentStagingError.transferFailed
         }
@@ -1994,7 +2022,49 @@ actor HeelerSSHTransport: Transport {
             method: method,
             params: params)
         let responseLine = try await withRequestDeadline {
+            let environment = try await self.apiEnvironment()
             let socketPath = try await self.resolvedSocketPath()
+            if environment.isWindows {
+                try await self.checkWindowsBridge()
+                return try await self.channelAdmission.withChannel(.ordinarySession) {
+                    let exec: SSHExecChannel
+                    do {
+                        exec = try await self.connection.openExec(
+                            command: PowerShellCommand.herdr(
+                                arguments: ["remote-api-bridge"], socketPath: socketPath,
+                                location: self.socketLocation, streaming: true), timeout: self.requestTimeout)
+                    } catch { throw await self.mapOperationError(error) }
+                    let channel = BootstrappedExecChannel(channel: exec)
+                    do {
+                        try await beforeDispatch?()
+                        try await channel.write(Data(line.utf8), timeout: self.requestTimeout)
+                        await onDispatched?()
+                        var response = Data()
+                        while let chunk = try await channel.read(
+                            maximumBytes: 16 * 1024, timeout: self.requestTimeout)
+                        {
+                            response.append(chunk)
+                            if let newline = response.firstIndex(of: 0x0A) {
+                                let result = Data(response[...newline])
+                                guard result.count <= Self.maximumResponseBytes else {
+                                    throw SSHError.responseTooLarge(limit: Self.maximumResponseBytes)
+                                }
+                                try await channel.close(timeout: .seconds(2))
+                                return result
+                            }
+                            guard response.count <= Self.maximumResponseBytes else {
+                                throw SSHError.responseTooLarge(limit: Self.maximumResponseBytes)
+                            }
+                        }
+                        throw TransportError.channelFailed(
+                            detail: "The Windows herdr API bridge closed before a reply. Start the selected herdr session on the Host.")
+                    } catch {
+                        try? await channel.close(timeout: .seconds(2))
+                        if error is SSHError { throw await self.mapOperationError(error) }
+                        throw error
+                    }
+                }
+            }
             return try await self.channelAdmission.withChannel(.ordinaryForwarding) {
                 do {
                     return try await self.connection.exchangeStreamLocal(
@@ -2083,34 +2153,107 @@ actor HeelerSSHTransport: Transport {
     }
 
     private func resolvedSocketPath() async throws -> String {
-        if case .absolutePath(let path) = socketLocation { return path }
-        return socketLocation.path(homeDirectory: try await remoteHomeDirectory())
+        try await apiEnvironment().socketPath(for: socketLocation)
+    }
+
+    /// A pre-resolved Unix endpoint never needed HOME. Preserve that contract
+    /// while native Windows endpoints still discover their platform once.
+    private func apiEnvironment() async throws -> RemoteHostEnvironment {
+        if case .absolutePath(let path) = socketLocation,
+            path.hasPrefix("/"),
+            connection.serverIdentification?.contains("Windows") != true
+        {
+            return .posix(home: "/")
+        }
+        return try await remoteEnvironment()
     }
 
     func remoteHomeDirectory() async throws -> String {
+        try await remoteEnvironment().home
+    }
+
+    private func remoteEnvironment() async throws -> RemoteHostEnvironment {
         try await withRequestDeadline {
-            try await self.homeDirectory.value {
-                let result = try await self.runExec(Self.cLocaleCommand(self.homeCommand))
-                guard
-                    result.exitStatus == 0,
-                    let home = Self.markerValue(
-                        in: result.stdout,
-                        prefix: Self.homeOutputPrefix),
-                    RemoteShellPath.isQuotableAbsolute(home)
+            try await self.environment.value {
+                if self.connection.serverIdentification?.contains("Windows") != true {
+                    let result = try await self.runExec(Self.cLocaleCommand(self.homeCommand))
+                    if result.exitStatus == 0,
+                        let home = Self.markerValue(
+                            in: result.stdout,
+                            prefix: Self.homeOutputPrefix),
+                        RemoteShellPath.isQuotableAbsolute(home)
+                    {
+                        return .posix(home: home)
+                    }
+                }
+                let windows = try await self.runExec(RemoteHostEnvironment.windowsProbe)
+                guard windows.exitStatus == 0,
+                    let environment = RemoteHostEnvironment.windows(from: windows.stdout)
                 else {
                     throw TransportError.homeDirectoryUnresolvable(
-                        detail: "home command printed: \(Self.preview(result.stdout))")
+                        detail: "Neither the POSIX home probe nor the native Windows USERPROFILE probe returned an absolute path.")
                 }
-                return home
+                await self.configureWindowsHost()
+                return environment
             }
+        }
+    }
+
+    private var isWindowsHost: Bool {
+        detectedWindows || connection.serverIdentification?.contains("Windows") == true
+    }
+
+    private func configureWindowsHost() async {
+        detectedWindows = true
+        await channelAdmission.useWindowsSessionBudget()
+    }
+
+    /// Offline Unix CLI commands do not need HOME or a live herdr endpoint.
+    private func hostCommandEnvironment() async throws -> RemoteHostEnvironment {
+        isWindowsHost ? try await remoteEnvironment() : .posix(home: "/")
+    }
+
+    private func checkWindowsBridge() async throws {
+        try await windowsBridgeCheck.value {
+            let result = try await self.runExec(
+                PowerShellCommand.herdr(arguments: ["remote-api-bridge", "--check"]))
+            if result.exitStatus == 127 { throw TransportError.herdrBinaryNotFound }
+            guard result.exitStatus == 0,
+                String(decoding: result.stdout, as: UTF8.self)
+                    .split(whereSeparator: \.isNewline).contains("herdr-api-bridge-v1")
+            else {
+                throw TransportError.hostFeatureUnavailable(
+                    feature: "Native Windows connections require herdr 0.9.3 or newer with remote-api-bridge")
+            }
+        }
+    }
+
+    private func requirePOSIXHost(feature: String) async throws {
+        if isWindowsHost {
+            throw TransportError.hostFeatureUnavailable(
+                feature: "\(feature) is not yet supported on native Windows")
         }
     }
 
     private func runHostCommand(_ command: String) async throws -> Data {
         do {
             return try await withRequestDeadline {
+                let environment = try await self.hostCommandEnvironment()
+                let invocation: String
+                if environment.isWindows {
+                    if command == self.sessionListCommand {
+                        invocation = PowerShellCommand.herdr(
+                            arguments: ["session", "list", "--json"], streaming: true)
+                    } else if command == self.agentDiscoveryCommand {
+                        invocation = PowerShellCommand.discovery
+                    } else {
+                        throw TransportError.hostFeatureUnavailable(feature: "This Host command is unavailable on native Windows")
+                    }
+                } else {
+                    invocation = Self.cLocaleCommand(HerdrHostPath.wrappingBareHerdr(command))
+                }
                 let result = try await self.runExec(
-                    Self.cLocaleCommand(HerdrHostPath.wrappingBareHerdr(command)))
+                    invocation)
                 if let missing = HerdrHostPath.missingBinaryError(
                     exitStatus: result.exitStatus, command: command)
                 {
@@ -2119,6 +2262,12 @@ actor HeelerSSHTransport: Transport {
                 guard result.reachedEOF else {
                     throw TransportError.channelFailed(
                         detail: "Host command closed before EOF")
+                }
+                if environment.isWindows {
+                    guard let output = PowerShellCommand.outputAfterMarker(result.stdout) else {
+                        throw TransportError.channelFailed(detail: "The Windows Host command did not start")
+                    }
+                    return output
                 }
                 return result.stdout
             }
@@ -2168,6 +2317,7 @@ actor HeelerSSHTransport: Transport {
     /// observes its exit. Cancelling package exec while that group is alive
     /// can exhaust channel cleanup and invalidate Events and every Attach.
     func runGitScript(_ script: Data) async throws -> GitExecResult {
+        try await requirePOSIXHost(feature: "Changes")
         do {
             try Task.checkCancellation()
             // POSIX sleep accepts whole seconds. Round down, with a one-second
@@ -2439,13 +2589,25 @@ actor HeelerSSHTransport: Transport {
         let requestLine = try HerdrWire.subscribeRequestLine(
             id: requestID,
             subscriptions: subscriptions)
-        let channel: SSHStreamLocalChannel
+        let environment = try await apiEnvironment()
+        let channel: any HeelerSSHAPIChannel
         do {
-            channel = try await connection.openStreamLocal(
-                socketPath: socketPath,
-                timeout: requestTimeout)
+            if environment.isWindows {
+                try await checkWindowsBridge()
+                let exec = try await connection.openExec(
+                    command: PowerShellCommand.herdr(
+                        arguments: ["remote-api-bridge"], socketPath: socketPath,
+                        location: socketLocation, streaming: true), timeout: requestTimeout)
+                channel = BootstrappedExecChannel(channel: exec)
+            } else {
+                channel = try await connection.openStreamLocal(
+                    socketPath: socketPath,
+                    timeout: requestTimeout)
+            }
         } catch SSHError.streamLocalOpenFailed {
             throw try await classifyStreamLocalOpenFailure(socketPath: socketPath)
+        } catch let error as TransportError {
+            throw error
         } catch {
             throw await mapOperationError(error)
         }
@@ -2502,7 +2664,7 @@ actor HeelerSSHTransport: Transport {
 
     private func runEventsChannel(
         readerID: UInt64,
-        channel: SSHStreamLocalChannel,
+        channel: any HeelerSSHAPIChannel,
         admissionLease: SSHChannelAdmissionLease,
         ack ackContinuation: AsyncThrowingStream<Data, any Error>.Continuation,
         events eventContinuation: AsyncThrowingStream<HerdrEvent, any Error>.Continuation
@@ -2612,19 +2774,40 @@ actor HeelerSSHTransport: Transport {
                 agentAttachCommand: attachCommand,
                 terminalAttachCommand: terminalAttachCommand,
                 target: request.target)
-            let command = try Self.attachExecCommand(
-                agentAttachCommand: attachCommand,
-                terminalAttachCommand: terminalAttachCommand,
-                request: request,
-                socketPath: socketPath)
-            let channel: SSHPTYChannel
+            let environment = try await apiEnvironment()
+            let channel: any HeelerSSHAttachChannel
             do {
-                channel = try await connection.openPTY(
-                    command: command,
-                    columns: request.cols,
-                    rows: request.rows,
-                    timeout: requestTimeout)
+                if environment.isWindows {
+                    try await checkWindowsBridge()
+                    guard (1...Int(UInt16.max)).contains(request.cols),
+                        (1...Int(UInt16.max)).contains(request.rows),
+                        !request.target.identifier.isEmpty
+                    else {
+                        throw TransportError.channelFailed(detail: "Invalid terminal controller target or geometry")
+                    }
+                    var arguments = ["terminal", "session", "control", request.target.identifier,
+                        "--cols", String(request.cols), "--rows", String(request.rows)]
+                    if request.takeover { arguments.append("--takeover") }
+                    let exec = try await connection.openExec(
+                        command: PowerShellCommand.herdr(
+                            arguments: arguments, socketPath: socketPath, location: socketLocation,
+                            streaming: true),
+                        timeout: requestTimeout)
+                    channel = WindowsTerminalChannel(channel: BootstrappedExecChannel(channel: exec))
+                } else {
+                    let command = try Self.attachExecCommand(
+                        agentAttachCommand: attachCommand,
+                        terminalAttachCommand: terminalAttachCommand,
+                        request: request,
+                        socketPath: socketPath)
+                    channel = try await connection.openPTY(
+                        command: command,
+                        columns: request.cols,
+                        rows: request.rows,
+                        timeout: requestTimeout)
+                }
             } catch {
+                if let error = error as? TransportError { throw error }
                 throw await mapOperationError(error)
             }
 
@@ -2744,7 +2927,7 @@ actor HeelerSSHTransport: Transport {
     private func runAttachChannel(
         target: TerminalAttachTarget,
         readerID: UInt64,
-        channel: SSHPTYChannel,
+        channel: any HeelerSSHAttachChannel,
         admissionLease: SSHChannelAdmissionLease,
         input: TerminalAttachInputQueue,
         output: HeelerSSHAttachOutputGate,

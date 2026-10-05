@@ -201,6 +201,21 @@ struct StartAgentStoreTests {
         }
     }
 
+    @Test func windowsHomeAndBrowsedDirectoryArePassedThroughToLaunch() async {
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [Host.fixture()], remoteHome: { _ in #"C:\Users\dev"# }, recorder: recorder)
+        await store.discoverAgents()
+        store.selectNewWorkspace()
+        await store.submit()
+        store.applyBrowsedDirectory("D:/Projects/new workspace")
+        await store.submit()
+        #expect(recorder.destinations == [
+            .newWorkspace(NewWorkspaceSpec(directory: #"C:\Users\dev"#, label: nil)),
+            .newWorkspace(NewWorkspaceSpec(directory: "D:/Projects/new workspace", label: nil)),
+        ])
+    }
+
     @Test func invalidDirectoryAndStaleWorkspaceDoNotReplaceTheSelection() {
         let store = makeStore(
             hosts: [Host.fixture()],

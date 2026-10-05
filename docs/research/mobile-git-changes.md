@@ -3,6 +3,28 @@
 Issue: [#220](https://github.com/ZingerLittleBee/Heeler/issues/220).
 Date: 2026-09-28
 
+## Status and current implementation
+
+This is the pre-implementation research record, with later measurement notes
+retained where they were added. Its proposed method names, implementation plan,
+and source-line anchors describe that investigation; they are not the current
+acceptance brief or a source map.
+
+Read [the current Changes route](../agents/navigation.md#changes-and-agent-directory)
+for the implemented owners and tests. `Agent.foregroundCwd` and
+`ConsoleAgent.directory` now carry the current directory. The typed Transport
+operations are `readChanges`, `readFilePatch`, and `listUntrackedDirectory`;
+`HeelerSSHTransport.runGitScript` owns their bounded exec lifetime. Changes,
+untracked-directory expansion, intraline highlighting, Copy/Ask, and wide
+side-by-side rendering have implementations in `Sources/Heeler/Changes/`.
+
+Use [testing.md](../agents/testing.md) for current test lanes and fixture entry
+points, and [the handoff template](../agents/review-handoff.md) for amended
+acceptance and candidate-specific evidence. The historical observations below
+retain their recorded versions and verification limits. Protocol observations
+formerly in `CLAUDE.md` now live in
+[herdr-compatibility.md](../agents/herdr-compatibility.md).
+
 ## Decision
 
 It is feasible without changing herdr and without a new SSH or UI dependency.

@@ -50,6 +50,22 @@ struct SkillsPaneStoreTests {
         #expect(store.skills.map(\.name) == ["back"])
     }
 
+    @Test func unavailableHostFeatureExplainsTheSkillListFailure() async {
+        var calls: [Bool] = []
+        let failure = TransportError.hostFeatureUnavailable(feature: "Skills on native Windows")
+        let store = SkillsPaneStore { forceRefresh in
+            calls.append(forceRefresh)
+            throw failure
+        }
+
+        await store.loadIfNeeded()
+        await store.loadIfNeeded()
+
+        #expect(store.phase == .failed(failure.presentation.message))
+        #expect(store.skills.isEmpty)
+        #expect(calls == [false])
+    }
+
     @Test func failedRefreshKeepsThePreviousList() async {
         var shouldFail = false
         let store = SkillsPaneStore { _ in

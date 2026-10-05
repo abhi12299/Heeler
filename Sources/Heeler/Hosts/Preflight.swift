@@ -59,6 +59,9 @@ struct PreflightReport: Equatable, Sendable {
         let check: PreflightCheck
         let hint: String
         switch error {
+        case .hostFeatureUnavailable(let feature):
+            check = .remoteEnvironment
+            hint = feature + "."
         case .sshUnreachable(let detail):
             check = .connection
             hint = "Could not reach the Host over SSH. Check the address and port. (\(detail))"
@@ -165,10 +168,9 @@ struct PreflightReport: Equatable, Sendable {
             check = .connection
             hint = "The connection is busy. Try again."
         case .herdrBinaryNotFound:
-            // Preflight is one connect + ping and never execs herdr, so this
-            // case cannot fire here. Keep the closed taxonomy total anyway.
-            check = .connection
-            hint = "The herdr CLI was not found on the Host."
+            // Windows preflight verifies the official CLI bridge capability.
+            check = .herdrInstalled
+            hint = "The herdr CLI was not found on the Host's non-interactive SSH PATH."
         case .jumpHostFailed(let underlying):
             // The first hop broke, so the Host itself was never contacted and
             // nothing about it has been disproved. Name the Jump Host as the

@@ -245,6 +245,73 @@ struct HeelerSSHTransportBehaviorE2ETests {
         try await exerciseEventsStream(settings: environment.jumpSettings())
     }
 
+    @Test("absolute Unix endpoints preserve shell characters for RPC and Events without probing HOME")
+    func absoluteUnixEndpointPreservesShellCharactersWithoutHomeProbe() async throws {
+        let environment = try #require(HeelerSSHTransportBehaviorEnvironment.current)
+        let alias = environment.homePath + "/api-\(UUID().uuidString)-'\\.sock"
+        let probe = alias + ".probe"
+        // The socket path belongs to SSH stream-local forwarding, not a shell.
+        // Only the fixture's setup script needs POSIX argument quoting.
+        func quote(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        try #require(alias.utf8.count < 104, "the alias must fit macOS AF_UNIX paths")
+        let quotedAlias = quote(alias)
+        let quotedProbe = quote(probe)
+        let quotedSocket = quote(environment.socketPath)
+        let cleanup = Data("{ rm -f -- \(quotedAlias) \(quotedProbe); } </dev/null\n".utf8)
+        let setup = try await HeelerSSHTransport.connect(settings: environment.directSettings())
+        var selected: HeelerSSHTransport?
+        do {
+            let seeded = try await setup.runGitScript(Data("""
+                {
+                set -e
+                ln -s \(quotedSocket) \(quotedAlias)
+                [ -L \(quotedAlias) ]
+                [ "$(readlink \(quotedAlias))" = \(quotedSocket) ]
+                } </dev/null
+
+                """.utf8))
+            try #require(seeded.exitStatus == 0)
+
+            var settings = environment.directSettings(socket: .absolutePath(alias))
+            settings.homeCommand = "printf x > \(quotedProbe); exit 71"
+            let transport = try await HeelerSSHTransport.connect(settings: settings)
+            selected = transport
+            #expect(try await transport.ping().protocolVersion == 17)
+            let stream = try await transport.subscribeToEvents([.global(.paneCreated)])
+            var iterator = stream.events.makeAsyncIterator()
+            #expect(try await iterator.next()?.kind == HerdrEventKind(name: "future_herdr_event"))
+            let event = try await iterator.next()
+            #expect(event?.kind == GlobalEventKind.paneCreated.kind)
+            #expect(event?.data["pane_id"] == .string("fixture:event"))
+            await stream.end()
+            #expect(try await transport.ping().protocolVersion == 17)
+            try await transport.close()
+            selected = nil
+
+            let inspected = try await setup.runGitScript(Data("""
+                {
+                set -e
+                [ -L \(quotedAlias) ]
+                [ "$(readlink \(quotedAlias))" = \(quotedSocket) ]
+                [ ! -e \(quotedProbe) ]
+                rm -f -- \(quotedAlias) \(quotedProbe)
+                [ ! -e \(quotedAlias) ] && [ ! -L \(quotedAlias) ]
+                [ -S \(quotedSocket) ]
+                } </dev/null
+
+                """.utf8))
+            try #require(inspected.exitStatus == 0)
+            try await setup.close()
+        } catch {
+            if let selected { try? await selected.close() }
+            _ = try? await setup.runGitScript(cleanup)
+            try? await setup.close()
+            throw error
+        }
+    }
+
     @Test("direct Host Attach preserves PTY IO, resize, end, and reuse")
     func directAttach() async throws {
         let environment = try #require(HeelerSSHTransportBehaviorEnvironment.current)

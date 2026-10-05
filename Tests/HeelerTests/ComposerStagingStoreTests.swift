@@ -209,6 +209,45 @@ struct ComposerStagingStoreTests {
     }
 
     @Test(arguments: StagingTestMedium.allCases)
+    func unavailableHostFeatureDiscardsPreparationAndCannotRetry(
+        _ medium: StagingTestMedium
+    ) async throws {
+        let failure = TransportError.hostFeatureUnavailable(feature: "Uploads on native Windows")
+        let stageGate = ScriptedTransportCallGate()
+        await stageGate.open()
+        let fixture = try await makeFixture(
+            medium,
+            gates: stageGates(stageGate, for: medium),
+            hostFailure: failure)
+        defer { fixture.cleanup() }
+        var events: [ComposerStagingStore.OperationEvent] = []
+        fixture.store.onOperationEvent = { events.append($0) }
+
+        fixture.begin(medium)
+        try await waitUntil("the unavailable feature should surface") {
+            fixture.store.state.isFailed
+        }
+
+        let state = fixture.store.state
+        #expect(state.failure?.message == failure.presentation.message)
+        #expect(state.failure?.isRetryable == false)
+        #expect(fixture.store.presentation?.commands == [.dismiss])
+        #expect(!fixture.preparedFileExists(for: medium))
+        #expect(fixture.sideEffects.events.isEmpty)
+        #expect(await stageGate.entryCount == 1)
+        #expect(events.count == 1)
+
+        fixture.store.perform(.retry)
+        await Task.yield()
+
+        #expect(fixture.store.state == state)
+        #expect(await stageGate.entryCount == 1)
+        #expect(events.count == 1)
+        fixture.store.perform(.dismiss)
+        #expect(fixture.store.state == .idle)
+    }
+
+    @Test(arguments: StagingTestMedium.allCases)
     func dismissingRetryableFailureDiscardsPreparation(
         _ medium: StagingTestMedium
     ) async throws {
@@ -521,7 +560,8 @@ struct ComposerStagingStoreTests {
         _ selectedMedium: StagingTestMedium,
         stagePlans: [StagingPlan]? = nil,
         gates: StagingGates = StagingGates(),
-        nonCooperativeStager: NonCooperativeStager? = nil
+        nonCooperativeStager: NonCooperativeStager? = nil,
+        hostFailure: TransportError? = nil
     ) async throws -> StagingFixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("composer-staging-\(UUID().uuidString)", isDirectory: true)
@@ -564,6 +604,10 @@ struct ComposerStagingStoreTests {
                 prepared: file,
                 gate: gates.filePreparation),
             stageImage: { image, reporter in
+                if selectedMedium == .image, let hostFailure {
+                    await gates.imageStage?.waitUntilOpen()
+                    throw hostFailure
+                }
                 if selectedMedium == .image, let nonCooperativeStager {
                     return try await nonCooperativeStager.stageImage(
                         image,
@@ -574,6 +618,10 @@ struct ComposerStagingStoreTests {
                 }
             },
             stageFile: { file, reporter in
+                if selectedMedium == .file, let hostFailure {
+                    await gates.fileStage?.waitUntilOpen()
+                    throw hostFailure
+                }
                 if selectedMedium == .file, let nonCooperativeStager {
                     return try await nonCooperativeStager.stageFile(
                         file,
@@ -682,7 +730,7 @@ private enum StagingPlan: Sendable {
     case failure(AttachmentStagingError)
 }
 
-private struct StagingGates {
+private struct StagingGates: Sendable {
     var imagePreparation: ScriptedTransportCallGate?
     var filePreparation: ScriptedTransportCallGate?
     var imageStage: ScriptedTransportCallGate?

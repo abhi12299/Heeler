@@ -5,6 +5,24 @@ import Testing
 
 @Suite("SSH channel admission")
 struct SSHChannelAdmissionTests {
+    @Test func windowsExecCategoriesShareNineSessionSlots() async throws {
+        let admission = SSHChannelAdmission()
+        await admission.useWindowsSessionBudget()
+        var leases: [SSHChannelAdmissionLease] = []
+        for _ in 0..<5 { leases.append(try await admission.acquire(.attach)) }
+        leases.append(try await admission.acquire(.events))
+        for _ in 0..<3 { leases.append(try await admission.acquire(.ordinarySession)) }
+        #expect(await admission.snapshot().connection == 9)
+        let waiting = Task { try await admission.acquire(.ordinarySession) }
+        await Task.yield()
+        #expect(await admission.snapshot().connection == 9)
+        await leases.removeLast().release()
+        let next = try await waiting.value
+        #expect(await admission.snapshot().connection == 9)
+        await next.release()
+        for lease in leases { await lease.release() }
+        #expect(await admission.snapshot().connection == 0)
+    }
     @Test func productionLimitsReserveEventsAndAttachWithinTheConnectionCeiling() async throws {
         let limits = SSHChannelAdmission.Limits.production
         #expect(limits.ordinaryForwarding == 8)

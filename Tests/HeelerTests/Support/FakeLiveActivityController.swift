@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 @testable import Heeler
 
@@ -17,6 +18,21 @@ final class FakeLiveActivityController: LiveActivityControlling {
 
     private var nextID = 1
     private var records: [String: Record] = [:]
+    /// Token streams whose consumer has not terminated. A cancelled consumer
+    /// or a finished stream removes itself, so the count follows the
+    /// coordinator's own cancellation rather than this fake's records.
+    private let tokenSubscribers = SubscriberLedger()
+    var onDiagnostic: ((String) -> Void)?
+
+    var tokenSubscriberCount: Int { tokenSubscribers.count }
+
+    func finishStreams() {
+        for record in records.values {
+            for continuation in record.tokenContinuations { continuation.finish() }
+            for continuation in record.stateContinuations { continuation.finish() }
+        }
+        records.removeAll()
+    }
 
     private struct Record {
         var id: String
@@ -32,6 +48,7 @@ final class FakeLiveActivityController: LiveActivityControlling {
     }
 
     func emitToken(id: String, _ data: Data) {
+        onDiagnostic?("token emitted subscribers=\(records[id]?.tokenContinuations.count ?? 0)")
         records[id]?.lastToken = data
         for continuation in records[id]?.tokenContinuations ?? [] {
             continuation.yield(data)
@@ -93,6 +110,9 @@ final class FakeLiveActivityController: LiveActivityControlling {
                 continuation.finish()
                 return
             }
+            let subscribers = tokenSubscribers
+            let subscriber = subscribers.insert()
+            continuation.onTermination = { _ in subscribers.remove(subscriber) }
             record.tokenContinuations.append(continuation)
             let replay = record.lastToken
             records[handle.id] = record
@@ -118,5 +138,23 @@ final class FakeLiveActivityController: LiveActivityControlling {
             register(&record, continuation)
             records[handle.id] = record
         }
+    }
+}
+
+/// Live subscriber ids. `onTermination` runs off the main actor, synchronously
+/// with the cancellation or finish that ends a stream.
+private final class SubscriberLedger: Sendable {
+    private let ids = Mutex<Set<UUID>>([])
+
+    var count: Int { ids.withLock { $0.count } }
+
+    func insert() -> UUID {
+        let id = UUID()
+        ids.withLock { _ = $0.insert(id) }
+        return id
+    }
+
+    func remove(_ id: UUID) {
+        ids.withLock { _ = $0.remove(id) }
     }
 }

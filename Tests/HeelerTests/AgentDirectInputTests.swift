@@ -441,13 +441,21 @@ struct AgentDirectInputTests {
         keyboardTransitions.stopSampling()
         #expect(!composerInput.isFirstResponder)
         #expect(terminal.window === window)
-        #expect(inset.height == keyboardHeight)
-        #expect(
-            keyboardTransitions.observedInsetHeights.allSatisfy { $0 == keyboardHeight },
-            "Composer→Direct Input exposed transient insets: \(keyboardTransitions.observedInsetHeights)")
-        Self.expectStableKeyboardChrome(
+        // Only the Composer autocorrects, so the keyboard can drop its
+        // candidate bar as it changes hands. The inset settles on the
+        // keyboard the window measures.
+        let directKeyboardHeight = inset.height
+        #expect(directKeyboardHeight > 0 && directKeyboardHeight <= keyboardHeight)
+        let measuredDirectKeyboard = try #require(
+            TerminalKeyboardInset.layoutGuideHeight(in: window))
+        #expect(abs(directKeyboardHeight - measuredDirectKeyboard) <= 1)
+        Self.expectSingleInsetSettle(
+            keyboardTransitions.observedInsetHeights,
+            from: keyboardHeight, to: directKeyboardHeight,
+            direction: "Composer→Direct Input")
+        Self.expectSettlingKeyboardChrome(
             keyboardTransitions.chromeSamples,
-            keyboardHeight: keyboardHeight,
+            from: keyboardHeight, to: directKeyboardHeight,
             direction: "Composer→Direct Input")
         #expect(composer.draft == "do not send")
         #expect(await transport.agentPromptParams.isEmpty)
@@ -479,16 +487,19 @@ struct AgentDirectInputTests {
             } as? UITextView)
         #expect(!restored.isLocalInputEnabled)
         #expect(restoredComposerInput.isFirstResponder)
-        #expect(restoredComposerInput.autocorrectionType == terminal.autocorrectionType)
+        // The draft autocorrects; the terminal never does.
+        #expect(restoredComposerInput.autocorrectionType == .yes)
+        #expect(terminal.autocorrectionType == .no)
         #expect(restoredComposerInput.autocapitalizationType == terminal.autocapitalizationType)
         #expect(!terminal.isFirstResponder)
         #expect(inset.height == keyboardHeight)
-        #expect(
-            keyboardTransitions.observedInsetHeights.allSatisfy { $0 == keyboardHeight },
-            "Direct Input→Composer exposed transient insets: \(keyboardTransitions.observedInsetHeights)")
-        Self.expectStableKeyboardChrome(
+        Self.expectSingleInsetSettle(
+            keyboardTransitions.observedInsetHeights,
+            from: directKeyboardHeight, to: keyboardHeight,
+            direction: "Direct Input→Composer")
+        Self.expectSettlingKeyboardChrome(
             keyboardTransitions.chromeSamples,
-            keyboardHeight: keyboardHeight,
+            from: directKeyboardHeight, to: keyboardHeight,
             direction: "Direct Input→Composer")
         #expect(composer.draft == "do not send")
         #expect(await transport.agentPromptParams.isEmpty)
@@ -1683,6 +1694,7 @@ struct AgentDirectInputTests {
         private(set) var willChangeFrameCount = 0
         private(set) var observedInsetHeights: [CGFloat] = []
         private(set) var chromeSamples: [KeyboardChromeSample] = []
+        private var chromeSampleTimes: [CFTimeInterval] = []
 
         init(
             notificationCenter: NotificationCenter,
@@ -1730,6 +1742,7 @@ struct AgentDirectInputTests {
             willChangeFrameCount = 0
             observedInsetHeights = []
             chromeSamples = []
+            chromeSampleTimes = []
             captureChromeSample()
             let displayLink = CADisplayLink(target: self, selector: #selector(sampleDisplayFrame))
             displayLink.add(to: .main, forMode: .common)
@@ -1744,6 +1757,7 @@ struct AgentDirectInputTests {
         func captureChromeSample() {
             if let chromeSample {
                 chromeSamples.append(chromeSample())
+                chromeSampleTimes.append(CACurrentMediaTime())
             }
         }
 
@@ -1751,12 +1765,25 @@ struct AgentDirectInputTests {
             captureChromeSample()
         }
 
-        func hasStableTail(frameCount: Int = 4) -> Bool {
-            guard chromeSamples.count >= frameCount,
-                  let baseline = chromeSamples.last,
-                  baseline.switcherBottom != nil
+        /// Whether the chrome has rested on the current inset for longer
+        /// than the inset's settle animation. A frame-count tail can pass
+        /// in the gap between the handoff releasing the inset and the next
+        /// display frame, before the switcher has started to move (seen on
+        /// slower hosted runners, where the handoff outlasts the window).
+        func hasStableTail(
+            frameCount: Int = 4, duration: CFTimeInterval = 0.35
+        ) -> Bool {
+            guard let baseline = chromeSamples.last,
+                  let lastTime = chromeSampleTimes.last,
+                  let firstTime = chromeSampleTimes.first,
+                  baseline.switcherBottom != nil,
+                  abs(baseline.insetHeight - insetHeight()) <= 1,
+                  lastTime - firstTime >= duration
             else { return false }
-            return chromeSamples.suffix(frameCount).allSatisfy { sample in
+            let tail = zip(chromeSamples, chromeSampleTimes)
+                .filter { lastTime - $0.1 <= duration }
+                .map(\.0)
+            return tail.count >= frameCount && tail.allSatisfy { sample in
                 abs(sample.insetHeight - baseline.insetHeight) <= 1
                     && Self.close(sample.switcherBottom, baseline.switcherBottom)
             }
@@ -1841,23 +1868,56 @@ struct AgentDirectInputTests {
         return opacity
     }
 
-    private static func expectStableKeyboardChrome(
+    /// The inset may change once, from the outgoing keyboard's height to the
+    /// one the destination settled on, and never passes through any other
+    /// height (a dip, a candidate-row frame, zero). These are sampled at
+    /// keyboard notifications; the settle itself posts none, so the final
+    /// height is asserted by the caller.
+    private static func expectSingleInsetSettle(
+        _ heights: [CGFloat],
+        from: CGFloat,
+        to: CGFloat,
+        direction: String
+    ) {
+        let changes = zip(heights, heights.dropFirst()).filter { $0 != $1 }.count
+        #expect(
+            heights.allSatisfy { $0 == from || $0 == to } && changes <= 1,
+            "\(direction) exposed transient insets: \(heights)")
+    }
+
+    /// The display frames while the keyboard changes hands. With matching
+    /// keyboards nothing moves. When the Composer's candidate bar comes or
+    /// goes, the inset steps once to the settled keyboard and the Agent
+    /// switcher eases to its new resting place without bouncing.
+    private static func expectSettlingKeyboardChrome(
         _ samples: [KeyboardChromeSample],
-        keyboardHeight: CGFloat,
+        from: CGFloat,
+        to: CGFloat,
         direction: String
     ) {
         #expect(!samples.isEmpty, "\(direction) produced no display-frame samples")
         #expect(
-            samples.allSatisfy { abs($0.insetHeight - keyboardHeight) <= 1 },
-            "\(direction) moved the keyboard inset during a UIKit transition")
+            samples.allSatisfy {
+                abs($0.insetHeight - from) <= 1 || abs($0.insetHeight - to) <= 1
+            },
+            "\(direction) moved the keyboard inset through a transient height")
         let bottoms = samples.compactMap(\.switcherBottom)
         #expect(
             bottoms.count == samples.count,
             "\(direction) removed the Agent switcher during a UIKit transition")
-        guard let baseline = bottoms.first else { return }
+        guard let first = bottoms.first, let last = bottoms.last else { return }
+        // A shorter keyboard lowers the switcher by the same distance.
+        let travel = from - to
         #expect(
-            bottoms.allSatisfy { abs($0 - baseline) <= 1 },
-            "\(direction) moved the Agent switcher during a UIKit transition: \(bottoms)")
+            abs((last - first) - travel) <= 1,
+            "\(direction) left the Agent switcher off the settled keyboard: \(bottoms)")
+        let steps = zip(bottoms, bottoms.dropFirst()).map { $1 - $0 }
+        #expect(
+            steps.allSatisfy { travel >= 0 ? $0 >= -1 : $0 <= 1 }
+                && bottoms.allSatisfy {
+                    $0 >= min(first, last) - 1 && $0 <= max(first, last) + 1
+                },
+            "\(direction) bounced the Agent switcher: \(bottoms)")
     }
 
     /// Waits for the hosted terminal attached to the owner's current feed —

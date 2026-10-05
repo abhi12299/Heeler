@@ -75,7 +75,7 @@ Heeler is an **agent console**: a native dashboard of every coding agent running
 
 ## How it connects
 
-Heeler speaks herdr's JSON API over SSH: each request opens a
+On macOS and Linux Hosts, Heeler speaks herdr's JSON API over SSH: each request opens a
 direct-streamlocal channel onto `herdr.sock`, one long-lived channel carries
 the event stream, and interactive terminals run `herdr agent attach
 --takeover` on an SSH PTY. The only prerequisites are SSH access and a
@@ -83,14 +83,25 @@ running herdr — no server changes, no extra packages. The SSH server must
 allow stream-local forwarding (the OpenSSH default); onboarding calls it out
 when it's disabled.
 
+Native Windows Hosts (herdr >= 0.9.3) connect over SSH and are added manually.
+
 Unroutable machines can sit behind an SSH Jump Host:
 
 - [Set up remote access step by step](docs/guides/vps-jump-host-setup.md)
 - [Architecture, security boundaries, and the VPS runbook](docs/guides/vps-jump-host.md)
 
+## Installation
+
+Install Heeler from the [App Store](https://apps.apple.com/us/app/heeler-for-herdr/id6797263135)
+or [TestFlight](https://testflight.apple.com/join/aXSxRn4r).
+
+- **macOS / Linux:** Install [herdr](https://herdr.dev/docs/install/), enable SSH,
+  then follow the pairing steps below.
+- **Native Windows:** Follow the [Windows setup guide](docs/guides/windows-setup.md).
+
 ## Adding a machine
 
-On the machine running herdr (Node >= 20, herdr >= 0.7.5, OpenSSH server on —
+On a macOS or Linux machine running herdr (Node >= 20, herdr >= 0.7.5, OpenSSH server on —
 macOS: **System Settings > General > Sharing > Remote Login**):
 
 ```bash

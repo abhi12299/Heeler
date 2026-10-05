@@ -4,8 +4,11 @@ status: accepted
 
 # Shell Terminal rides herdr's direct terminal attach
 
-ADR 0017 supersedes this decision's always-create target selection and single
-Host terminal lifetime. The direct terminal attach transport remains in use.
+[ADR 0017](0017-workspace-terminal-inventory-and-retention.md) supersedes this
+decision's always-create target selection and single Host terminal lifetime.
+[ADR 0016](0016-direct-input-on-agent-attach.md) adds opt-in Direct Input on
+Agent detail. Unix retains the direct terminal attach transport; native Windows
+uses the controller path in [ADR 0018](0018-native-windows-hosts.md).
 
 Agent detail gains **Open Terminal** (#231): one tap creates one fresh herdr
 tab in the Agent's launch directory — `tab.create` with the Agent's workspace

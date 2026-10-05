@@ -3,6 +3,15 @@ import Testing
 
 @testable import Heeler
 
+/// Repeated diagnostics need a larger outer budget. Invalid input retains the
+/// normal deadlock limit and fails the iteration guard inside the test.
+private func hasRepeatedWeakChangesDiagnostic() -> Bool {
+    guard let configured = ProcessInfo.processInfo.environment["HEELER_WEAK_CHANGES_ITERATIONS"],
+          let iterations = Int(configured), (2...100).contains(iterations)
+    else { return false }
+    return true
+}
+
 /// The product driven over a link the test degrades on purpose.
 ///
 /// The merge gate runs unprivileged, which rules out `pfctl`/`dummynet` and the
@@ -10,9 +19,9 @@ import Testing
 /// unprivileged TCP proxy in front of the disposable sshd
 /// (`scripts/fixtures/weak-network-proxy.py`) and these suites steer it: added
 /// latency, a bandwidth cap, mid-stream fragmentation, and abrupt severance.
-/// Every impairment is a fixed duration or a byte count, so a profile treats
-/// the link the same way on every run and a failure here means a defect rather
-/// than a bad draw.
+/// Parameters and impairment bounds are fixed; OS receive boundaries and
+/// scheduling still vary, so a failure needs diagnosis rather than an assumed
+/// reproducible timing explanation.
 ///
 /// `.timeLimit` is the deadlock instrument. Everything these tests exercise is
 /// bounded by the product's own deadlines, so a run that has not finished
@@ -24,7 +33,7 @@ import Testing
         if: RealSSHFixture.gate(HeelerSSHTransportBehaviorEnvironment.current != nil),
         "requires the disposable impairment proxy fixture"),
     .serialized,
-    .timeLimit(.minutes(2)))
+    .timeLimit(hasRepeatedWeakChangesDiagnostic() ? .minutes(30) : .minutes(2)))
 struct WeakNetworkE2ETests {
     @Test("concurrent RPCs survive latency, a bandwidth cap, and fragmentation")
     func concurrentRPCsSurviveADegradedLink() async throws {
@@ -238,11 +247,30 @@ struct WeakNetworkE2ETests {
         // per-request deadline is what must end this — not a hung channel.
         try await fixture.control.apply(.starved)
         let started = ContinuousClock.now
+        let recovery = TimeoutRecoveryRecorder()
+        // Restore the link at the timeout boundary, before the timed-out
+        // channel's two-second close exchange. The proxy re-meters bytes it
+        // already holds, so a starved response queued ahead of the remote
+        // close no longer drains at 64 bytes per second.
+        await transport.runNextStreamLocalTimeoutHookForTesting {
+            try #require(started.duration(to: .now) >= .seconds(4))
+            try await fixture.control.apply(.degraded)
+            await recovery.record()
+        }
         await #expect(throws: TransportError.timedOut) { _ = try await transport.ping() }
         #expect(started.duration(to: .now) < .seconds(20))
 
-        try await fixture.control.apply(.degraded)
+        // The deadline may return before the cancelled native operation drains.
+        try await waitUntil("the timeout gate should restore bandwidth before cleanup") {
+            await recovery.count == 1
+        }
+        try #require(await recovery.count == 1)
+        try await waitUntil("the timed-out channel should be reclaimed") {
+            await transport.oneShotChannelCountForTesting() == 0
+        }
+        #expect(await transport.oneShotChannelCountForTesting() == 0)
         #expect(try await transport.ping().protocolVersion == 17)
+        #expect(await recovery.count == 1)
         try await transport.close()
     }
 
@@ -451,6 +479,12 @@ struct WeakNetworkE2ETests {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(await condition(), comment)
+    }
+
+    private actor TimeoutRecoveryRecorder {
+        private(set) var count = 0
+
+        func record() { count += 1 }
     }
 
     private actor StatusRecorder {

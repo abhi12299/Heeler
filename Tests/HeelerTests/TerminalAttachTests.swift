@@ -2005,6 +2005,51 @@ struct TerminalAttachTests {
         #expect((TerminalKeyboardInset.layoutGuideHeight(in: window) ?? 0) > 0)
     }
 
+    /// iOS 26 publishes the settled frame from inside `becomeFirstResponder`
+    /// when the keyboard changes hands. The requester only records the
+    /// handoff once the request returns, so the settle must reach it after.
+    @MainActor
+    @Test func aSettleRaisedInsideTheComposersRequestIsReportedAfterItReturns()
+        async throws
+    {
+        let controller = UIViewController()
+        let previousOwner = UITextField(frame: CGRect(x: 20, y: 20, width: 240, height: 44))
+        let composer = AgentComposerUITextView(
+            frame: CGRect(x: 20, y: 80, width: 240, height: 44))
+        composer.updateKeyboard(presentation: .system)
+        controller.view.addSubview(previousOwner)
+        controller.view.addSubview(composer)
+        let window = try await makeTestWindow(
+            frame: UIScreen.main.bounds, rootViewController: controller)
+        defer {
+            composer.resignFirstResponder()
+            previousOwner.resignFirstResponder()
+            window.isHidden = true
+        }
+        previousOwner.becomeFirstResponder()
+        try #require(await Self.eventually {
+            (TerminalKeyboardInset.layoutGuideHeight(in: window) ?? 0) > 0
+        })
+        let guideFrame = try #require(TerminalKeyboardInset.keyboardLayoutGuideFrame(in: window))
+        let settledFrame = window.convert(guideFrame, to: window.screen.coordinateSpace)
+        let observer = NotificationCenter.default.addObserver(
+            forName: UITextView.textDidBeginEditingNotification, object: composer, queue: nil
+        ) { _ in
+            NotificationCenter.default.post(
+                name: UIResponder.keyboardDidChangeFrameNotification, object: nil,
+                userInfo: [UIResponder.keyboardFrameEndUserInfoKey: settledFrame])
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        var settledIDs: [UUID] = []
+        composer.onKeyboardHandoffSettled = { settledIDs.append($0) }
+
+        let id = UUID()
+        #expect(composer.requestKeyboardHandoff(id: id))
+        #expect(settledIDs.isEmpty)
+        try #require(await Self.eventually { !settledIDs.isEmpty })
+        #expect(settledIDs == [id])
+    }
+
     /// Focusing the Composer with a hardware keyboard attached, as the iPad
     /// simulator publishes it: a zero-height frame at the bottom edge, then
     /// will-hide, confirmed.
@@ -2144,6 +2189,41 @@ struct TerminalAttachTests {
         #expect(!inset.isHoldingHandoffHeight)
         #expect(inset.height == 402)
         #expect(inset.lastPresentedHeight == 402)
+    }
+
+    /// Composer autocorrect raises a candidate bar that Direct Input never
+    /// shows, so the keyboard changes height while it changes hands. Its
+    /// resized frame lands inside the freeze and is dropped; the settle must
+    /// adopt the keyboard the window measures, or the input chrome keeps the
+    /// candidate bar's gap (or sits under the taller keyboard) until the next
+    /// presentation. A matching keyboard keeps the frozen height.
+    @MainActor
+    @Test(arguments: [CGFloat(375), 402, 429])
+    func endingAHandoffAdoptsTheSettledKeyboardHeight(measured: CGFloat) async throws {
+        let center = NotificationCenter()
+        let inset = TerminalKeyboardInset(notificationCenter: center) { _ in 402 }
+        inset.destinationResponderHandoffFallbackDelay = .seconds(60)
+        center.post(
+            name: UIResponder.keyboardWillShowNotification, object: nil,
+            userInfo: [UIResponder.keyboardFrameEndUserInfoKey: CGRect(
+                x: 0, y: 554, width: 440, height: 436)])
+        try await Task.sleep(for: .milliseconds(120))
+        #expect(inset.height == 402)
+
+        let handoffID = inset.beginDestinationOwnedResponderHandoff()
+        center.post(
+            name: UIResponder.keyboardWillChangeFrameNotification, object: nil,
+            userInfo: [UIResponder.keyboardFrameEndUserInfoKey: CGRect(
+                x: 0, y: 581, width: 440, height: 409)])
+        #expect(inset.height == 402)
+
+        inset.endResponderHandoff(handoffID, currentHeight: { measured })
+        #expect(!inset.isHoldingHandoffHeight)
+        #expect(inset.height == measured)
+        #expect(inset.lastPresentedHeight == measured)
+        #expect(!inset.isConfirmingDismissal)
+        #expect(!inset.isSoftwareKeyboardDismissed)
+        #expect(Self.systemContentInset(inset) == measured)
     }
 
     /// A scene transition can emit will-hide without a matching did-frame.

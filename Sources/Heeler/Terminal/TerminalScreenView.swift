@@ -835,10 +835,11 @@ final class HeelerTerminalView: UITerminalView, TerminalByteSink {
 
     // Correction traits are pinned .no in every style: a terminal never
     // autocorrects (QuickType turns Space into accept-suggestion AND
-    // send-key — double input to the PTY). The Composer pins identical
-    // values (see AgentComposerUITextView); matching traits keep one
-    // keyboard context across the Direct Input responder transfer
-    // (de36399). Only autocapitalization still varies with the style.
+    // send-key — double input to the PTY). The Composer's local draft does
+    // autocorrect (see AgentComposerUITextView), so its candidate bar leaves
+    // the keyboard at the Direct Input responder transfer; the keyboard inset
+    // settles that height change. Only autocapitalization still varies with
+    // the style.
     override var autocapitalizationType: UITextAutocapitalizationType {
         get { textInputStyle == .naturalLanguage ? .sentences : .none }
         set {}

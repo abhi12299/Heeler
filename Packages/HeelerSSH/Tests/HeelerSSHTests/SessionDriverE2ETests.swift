@@ -127,6 +127,239 @@ struct SessionDriverE2ETests {
         }
     }
 
+    @Test("exec streams preserve stdout bytes without allocating a PTY")
+    func execStreamPreservesBytesWithoutPTY() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        let channel = try await connection.openExec(
+            command: "[ ! -t 0 ] && [ ! -t 1 ] || exit 99; "
+                + "IFS= read -r line; printf '%s\\000\\377' \"$line\"; exit 7",
+            timeout: .seconds(5))
+
+        try await channel.write(Data("request\r\n".utf8), timeout: .seconds(5))
+        var response = Data()
+        while let chunk = try await channel.read(maximumBytes: 3, timeout: .seconds(5)) {
+            response.append(chunk)
+        }
+        var expected = Data("request\r".utf8)
+        expected.append(contentsOf: [0, 255])
+        #expect(response == expected)
+        #expect(try await channel.exitStatus(timeout: .seconds(5)) == 7)
+        try await channel.close(timeout: .seconds(5))
+        try await connection.close(timeout: .seconds(2))
+    }
+
+    @Test("one-shot exec resumes owned reads before other exchange operations", arguments: [false, true])
+    func oneShotExecResumesOwnedReads(stderr: Bool) async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        let input = Data(repeating: 97, count: 131_072)
+        do {
+            // Neither stream writes before input arrives, so the owned read
+            // finds no data and must give up the send it no longer holds.
+            await connection.forceNextExchangeReadOwnerForTesting(stderr: stderr)
+            let echoed = try await connection.execute(
+                "cat; printf stderr >&2; exit 7",
+                input: input, timeout: .seconds(5))
+            #expect(echoed.stdout == input)
+            #expect(echoed.stderr == Data("stderr".utf8))
+            #expect(echoed.exitStatus == 7)
+            #expect(echoed.reachedEOF)
+
+            // The other stream's output and EOF arrive while the owned read
+            // is held, so that read queues them and no socket edge follows.
+            await connection.forceNextExchangeReadOwnerForTesting(stderr: stderr) {
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            let queued = try await connection.execute(
+                stderr ? "printf queued; exit 5" : "printf queued >&2; exit 5",
+                timeout: .seconds(5))
+            #expect(queued.stdout == Data((stderr ? "queued" : "").utf8))
+            #expect(queued.stderr == Data((stderr ? "" : "queued").utf8))
+            #expect(queued.exitStatus == 5)
+            #expect(queued.reachedEOF)
+            #expect(await connection.oneShotRegistryCountForTesting() == 0)
+            #expect(try await connection.execute("printf reusable", timeout: .seconds(5)).stdout
+                == Data("reusable".utf8))
+            try await connection.close(timeout: .seconds(2))
+        } catch {
+            try? await connection.close(timeout: .seconds(2))
+            throw error
+        }
+    }
+
+    @Test("exec streams discard stderr without blocking stdout")
+    func execStreamDiscardsStderrWithoutBlocking() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        await connection.startSamplingTransportSendOwnerForTesting()
+        for mixed in [false, true] {
+            let flood: String
+            var expected = Data()
+            if mixed {
+                flood = """
+                    for i in range(256):
+                        sys.stderr.buffer.write(b"x" * 16384)
+                        sys.stderr.flush()
+                        sys.stdout.buffer.write(bytes([i % 251]) * 17)
+                        sys.stdout.flush()
+                    """
+                for index in 0..<256 {
+                    expected.append(Data(repeating: UInt8(index % 251), count: 17))
+                }
+            } else {
+                flood = """
+                    sys.stderr.buffer.write(b"x" * 4194304)
+                    sys.stderr.flush()
+                    """
+            }
+            let producer = """
+                import sys
+                sys.stdout.buffer.write(b"producer-ready\\n")
+                sys.stdout.flush()
+                if sys.stdin.readline() != "go\\n":
+                    sys.exit(91)
+                \(flood)
+                sys.stdout.buffer.write(b"finished\\n")
+                sys.stdout.flush()
+                """
+            let channel = try await connection.openExec(
+                command: "python3 -u -c '\(producer)'",
+                timeout: SessionDriverTestEnvironment.setupTimeout)
+            // Process startup gets its own budget. The transfer deadline
+            // starts only after the producer has reached its stdin gate.
+            var ready = Data()
+            while !ready.contains(0x0A) {
+                ready.append(try #require(try await channel.read(
+                    maximumBytes: 64, timeout: SessionDriverTestEnvironment.setupTimeout)))
+            }
+            try #require(ready == Data("producer-ready\n".utf8))
+            let reading = Task {
+                var response = Data()
+                while let chunk = try await channel.read(timeout: .seconds(5)) {
+                    response.append(chunk)
+                }
+                return response
+            }
+            defer { reading.cancel() }
+            try await channel.write(Data("go\n".utf8), timeout: .seconds(5))
+            let independent = try await connection.execute("printf independent", timeout: .seconds(5))
+            #expect(independent.stdout == Data("independent".utf8))
+            #expect(independent.exitStatus == 0)
+            expected.append(Data("finished\n".utf8))
+            #expect(try await reading.value == expected)
+            #expect(try await channel.exitStatus(timeout: .seconds(5)) == 0)
+            try await channel.close(timeout: .seconds(5))
+        }
+        let ownerSamples = await connection.transportSendOwnerSamplesForTesting()
+        #expect(!ownerSamples.isEmpty)
+        #expect(ownerSamples.allSatisfy { !$0.isForbiddenClearWindow })
+        let reused = try await connection.execute("printf reusable", timeout: .seconds(5))
+        #expect(reused.stdout == Data("reusable".utf8))
+        #expect(await connection.isConnected)
+        try await connection.close(timeout: .seconds(2))
+    }
+
+    @Test("exec stream read timeout and cancellation preserve channel reuse")
+    func execStreamReadFailuresPreserveChannelReuse() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        let channel = try await connection.openExec(
+            command: "IFS= read -r line; printf '%s\\n' \"$line\"",
+            timeout: .seconds(5))
+        await #expect(throws: SSHError.timedOut) {
+            _ = try await channel.read(timeout: .milliseconds(100))
+        }
+
+        let hold = SessionWaitHold()
+        await connection.holdNextSessionWaitForTesting { await hold.waitUntilReleased() }
+        let reading = Task { try await channel.read(timeout: .seconds(5)) }
+        try await waitUntilTrue("the exec read should reach the wait") { await hold.hasEntered }
+        reading.cancel()
+        await hold.release()
+        await #expect(throws: SSHError.cancelled) {
+            _ = try await reading.value
+        }
+
+        try await channel.write(Data("reused\n".utf8), timeout: .seconds(5))
+        var response = Data()
+        while let chunk = try await channel.read(timeout: .seconds(5)) {
+            response.append(chunk)
+        }
+        #expect(response == Data("reused\n".utf8))
+        #expect(try await channel.exitStatus(timeout: .seconds(5)) == 0)
+        try await channel.close(timeout: .seconds(5))
+        for (failure, duringOwnedCleanup) in [
+            (SSHError.timedOut, false), (.cancelled, false),
+            (.timedOut, true), (.cancelled, true),
+        ] {
+            let interrupted = try await connection.openExec(
+                command: "printf 'producer-ready\\n'; IFS= read -r go; "
+                    + "printf 'recovered\\000\\377'; printf warning >&2; exit 9",
+                timeout: SessionDriverTestEnvironment.setupTimeout)
+            var ready = Data()
+            while !ready.contains(0x0A) {
+                ready.append(try #require(try await interrupted.read(
+                    maximumBytes: 64, timeout: SessionDriverTestEnvironment.setupTimeout)))
+            }
+            try #require(ready == Data("producer-ready\n".utf8))
+            if duringOwnedCleanup {
+                await connection.interruptNextExecStdoutOwnerForTesting(failure)
+            } else {
+                await connection.failNextExecStderrReadForTesting(failure)
+            }
+            try await interrupted.write(Data("go\n".utf8), timeout: .seconds(5))
+            // This independent channel drains remote packets into libssh2's
+            // queues before interruption at the stderr-read boundary.
+            let checkpoint = try await connection.execute("printf checkpoint", timeout: .seconds(5))
+            try #require(checkpoint.stdout == Data("checkpoint".utf8))
+            await #expect(throws: failure) {
+                _ = try await interrupted.read(
+                    maximumBytes: duringOwnedCleanup ? 9 : 3, timeout: .seconds(5))
+            }
+            var recovered = Data()
+            while let chunk = try await interrupted.read(maximumBytes: 3, timeout: .seconds(5)) {
+                #expect(chunk.count <= 3)
+                recovered.append(chunk)
+            }
+            var expected = Data("recovered".utf8)
+            expected.append(contentsOf: [0, 255])
+            #expect(recovered == expected)
+            #expect(try await interrupted.exitStatus(timeout: .seconds(5)) == 9)
+            try await interrupted.close(timeout: .seconds(5))
+        }
+        #expect(await connection.isConnected)
+        try await connection.close(timeout: .seconds(2))
+    }
+
+    @Test("closing a live exec stream is idempotent and spares the connection")
+    func execStreamCloseSparesConnection() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        let channel = try await connection.openExec(command: "cat", timeout: .seconds(5))
+        try await channel.close(timeout: .seconds(5))
+        try await channel.close(timeout: .seconds(5))
+        let result = try await connection.execute("printf reusable", timeout: .seconds(5))
+        #expect(result.stdout == Data("reusable".utf8))
+        #expect(result.exitStatus == 0)
+        try await connection.close(timeout: .seconds(2))
+    }
+
+    @Test("uncertain exec stream opening invalidates the connection")
+    func execStreamUncertainOpenInvalidatesConnection() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        await #expect(throws: SSHError.channelFailed) {
+            _ = try await connection.openExec(command: "invalid\0command", timeout: .seconds(5))
+        }
+        #expect(await connection.isConnected)
+        await #expect(throws: SSHError.timedOut) {
+            _ = try await connection.openExec(command: "cat", timeout: .zero)
+        }
+        #expect(!(await connection.isConnected))
+        try await connection.close(timeout: .seconds(2))
+    }
+
     @Test("remote transport loss reclaims every owned native resource")
     func remoteTransportLossReclaimsResources() async throws {
         let environment = try #require(SessionDriverTestEnvironment.current)

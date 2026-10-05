@@ -35,6 +35,12 @@ struct SSHDiagnosticsTests {
                     + "LIBSSH2_ERROR_KEY_EXCHANGE_FAILURE (\(LIBSSH2_ERROR_KEY_EXCHANGE_FAILURE))")
                 == true,
             Comment(rawValue: "recorded: \(lines)"))
+        #expect(
+            lines.first?.contains("negotiated_kex=curve25519-sha256") == true,
+            Comment(rawValue: "recorded: \(lines)"))
+        #expect(
+            lines.first?.contains("negotiated_hostkey=ssh-ed25519") == true,
+            Comment(rawValue: "recorded: \(lines)"))
     }
 
     @Test("a handshake that never receives a banner names the phase that timed out")
@@ -57,6 +63,7 @@ struct SSHDiagnosticsTests {
             lines.first?.hasPrefix("handshake with 127.0.0.1:\(listener.port) timed out [") == true,
             Comment(rawValue: "recorded: \(lines)"))
         #expect(lines.first?.contains("last_wait=socket read") == true)
+        #expect(lines.first?.contains("TCP connect=") == true)
 
         // Exercise the readiness timer itself, then let its caller overwrite
         // the context as a cleanup/drain would. The failure must already have

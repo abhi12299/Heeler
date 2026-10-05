@@ -28,6 +28,32 @@ Entries reference the issue that motivated them.
   link appears in the app while the connection waits for approval.
 - `make free-install` builds and installs Heeler with a free Apple ID, without
   push notifications or Live Activities.
+- Autocorrect and spell checking in native Composer drafts. Direct Input and
+  shell terminals keep them off. (#407)
+- Manual SSH connections to native Windows herdr 0.9.3 or newer, including
+  default and named sessions, live Agent and shell terminals, and Windows
+  directory navigation. Windows uses herdr's official API bridge and terminal
+  controller. Pairing, Changes, Skills, file uploads, and notification
+  registration remain unavailable on Windows. (#400)
+- Long-press an Agent row to close its pane, tab, or workspace, with the same
+  confirmation as the swipe action. (#408)
+- Agent and terminal screens on iPhone have floating glass buttons for Back,
+  the Workspace's terminals, and an Agent's Changes. They start folded to a
+  single button and stay shown once the user opens them. Swiping back from
+  either follows the finger like any other screen. (#409)
+
+### Fixed
+
+- Fix Agent terminal connections failing when an older system herdr shadows the user's updated installation. (#404)
+- Opening an Agent from the iPhone Agent list no longer shows the input bar
+  a tab bar's height too high before it drops to the bottom of the screen.
+  (#406)
+
+- Preserve literal absolute Unix API endpoints without a HOME probe, and keep
+  Windows API and terminal connections on the selected session when SSH
+  inherits legacy socket overrides. (#400)
+- Large diffs in Changes no longer wait for the Git timeout when the SSH
+  connection briefly cannot send. (#402)
 
 ## [0.1.12] - 2026-10-02
 

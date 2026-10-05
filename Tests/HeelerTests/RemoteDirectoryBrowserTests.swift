@@ -96,6 +96,28 @@ struct RemoteDirectoryBrowserTests {
         #expect(browser.visibleDirectories == ["alpha", "beta"])
     }
 
+    @Test func windowsHomeSupportsEnteringAndReturningToTheDriveRoot() async throws {
+        let fake = FakeLister()
+        fake.listings = [
+            #"C:\Users\dev"#: RemoteDirectoryListing(directories: ["src"], truncated: false),
+            #"C:\Users\dev\src"#: RemoteDirectoryListing(directories: [], truncated: false),
+        ]
+        let browser = makeBrowser(fake, home: #"C:\Users\dev"#)
+        browser.start()
+        try await waitUntil("Windows home loaded") { browser.currentPath == #"C:\Users\dev"# }
+        browser.enter("src")
+        try await waitUntil("Windows child loaded") { browser.currentPath == #"C:\Users\dev\src"# }
+        browser.goBack()
+        try await waitUntil("Windows home restored") { browser.currentPath == #"C:\Users\dev"# }
+        browser.goBack()
+        try await waitUntil("Windows parent loaded") { browser.currentPath == #"C:\Users"# }
+        browser.goBack()
+        try await waitUntil("Windows drive root loaded") { browser.currentPath == #"C:\"# }
+        #expect(!browser.canGoBack)
+        #expect(fake.calls == [#"C:\Users\dev"#, #"C:\Users\dev\src"#,
+            #"C:\Users\dev"#, #"C:\Users"#, #"C:\"#])
+    }
+
     @Test func successfulNavigationClearsThePreviousFoldersFilter() async throws {
         let fake = FakeLister()
         fake.listings = [

@@ -15,9 +15,9 @@ Read these before changing anything non-trivial:
   outside (the transport design especially) and the dead ends that led to
   them. Challenge them with evidence, not re-litigation.
 - [`CLAUDE.md`](CLAUDE.md) — the working guide for humans and coding agents
-  alike: conventions, load-bearing herdr facts, and the commands that
-  matter. Coding agents are first-class contributors here; the repo is
-  deliberately structured for them.
+  alike. Use [the source map](docs/agents/navigation.md) to find feature owners,
+  transport seams, focused tests, and current ADRs. Dated compatibility evidence
+  is in [herdr-compatibility.md](docs/agents/herdr-compatibility.md).
 
 The repo carries four deliverables: the iOS app (`Sources/`,
 `Packages/HeelerSSH`), the herdr plugin that renders Pairing Codes and posts
@@ -37,18 +37,27 @@ and every `make` build target regenerates it. CI builds the *committed*
   suites (those run through `scripts/run-heelerssh-package-tests.sh`, not
   `-only-testing`).
 - One suite:
-  `make test-app TEST_FLAGS='-only-testing:HeelerTests/<SuiteTypeName>'`.
+  `make test-app TEST_SELECTOR='HeelerTests/<SuiteTypeName>'`.
   This and the CI app lane enable simulator accessibility before launching
   the test host, then restore the original preferences. Direct `xcodebuild`
   skips that preparation and can miss SwiftUI accessibility labels on a clean
   simulator. Pin a device with
   `SIM_DESTINATION='platform=iOS Simulator,id=<UDID>'` when needed.
+- `make test-ci-app` and `make test-ci-package` run the respective committed-project
+  CI lanes; `make test-tools` runs local runner and navigation checks.
 - `npm test` inside `plugin/` or `relay/` for the Node deliverables
   (Node >= 20, no install step).
 
 A few suites exercise a real SSH server; they skip cleanly on machines
 without a local sshd and seeded key, and CI provisions disposable sshd
 instances to run them for you.
+
+[The testing guide](docs/agents/testing.md) routes app, package, fixture, and
+platform checks and explains selectors, executed-count evidence, and isolated
+build outputs. For native Simulator work, use
+[the UI runbook](docs/agents/simulator-ui.md). Before review or regrade, capture
+the effective acceptance and candidate in
+[the handoff template](docs/agents/review-handoff.md).
 
 CI reads Changes only from macOS git under POSIX sh. With Docker running,
 `SIMULATOR_UDID=<UDID> scripts/verify-changes-linux-host.sh` builds a local
@@ -75,8 +84,9 @@ Two artifact families are generated or shared — never hand-edit them:
 - Never hand-edit `MARKETING_VERSION` or create version tags — releases are
   cut by the maintainer with `make publish`, and `CHANGELOG.md` is the
   source of both the version and the notes.
-- Keys and secrets never leave the Keychain and never appear in code, logs,
-  or fixtures.
+- Private SSH keys stay in the Keychain and secrets stay out of code, logs,
+  and fixtures. Per-Host Notification Keys are copied over SSH so the Host
+  plugin can encrypt notifications.
 
 ## Commit attribution
 

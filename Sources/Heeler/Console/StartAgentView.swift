@@ -338,7 +338,7 @@ struct StartWorkspacePicker: View {
     let onNewWorkspace: () -> Void
 
     private var directoryName: String {
-        newDirectory?.split(separator: "/").last.map(String.init) ?? "/"
+        newDirectory.map { RemoteHostPath.lastComponent(of: $0) } ?? "/"
     }
 
     private var selection: Binding<Selection?> {

@@ -7,13 +7,18 @@
 PROJECT := Heeler.xcodeproj
 SCHEME  := Heeler
 ARCHIVE := build/Heeler.xcarchive
-DERIVED := build/DerivedData
+DERIVED_DEVICE ?= build/DerivedData-device
+DERIVED_SIMULATOR ?= build/DerivedData-simulator
+DERIVED ?= $(DERIVED_DEVICE)
 APP_ID  := dev.bybee.heeler
 SIM     ?= iPhone 17
 SIM_IPAD ?= iPad Pro 13-inch (M5)
 SIM_DESTINATION ?= platform=iOS Simulator,name=$(SIM)
 SIMULATOR_UDID ?=
+CI_APP_SHARD ?= all
 TEST_FLAGS ?=
+TEST_SELECTOR ?=
+export TEST_FLAGS TEST_SELECTOR
 BUILD_FLAGS ?=
 IOS_WATCH_DEBOUNCE ?= 1s
 
@@ -22,7 +27,10 @@ IOS_WATCH_DEBOUNCE ?= 1s
 DEVICE ?= $(shell python3 scripts/find-ios-device.py iPhone)
 DEVICE_IPAD ?= $(shell python3 scripts/find-ios-device.py iPad)
 
-.PHONY: free-generate free-build free-install help generate resolve build test test-app test-ipad test-ci-app build-device install install-ipad watch-ios-device sim sim-ipad build-sim sim-id archive upload testflight bump publish clean check-device check-device-ipad ssh-artifacts verify-ssh-artifacts
+.PHONY: free-generate free-build free-install help generate resolve build test test-app test-ipad test-ci-app test-ci-package test-ci-evidence test-ci-background-build test-tools test-ci-guards test-ci-watchdog test-ci-recovery check-agent-docs check-test-membership simulator-ui build-device install install-ipad watch-ios-device sim sim-ipad build-sim sim-id archive upload testflight bump publish clean check-device check-device-ipad ssh-artifacts verify-ssh-artifacts
+
+# Command-line DERIVED overrides remain supported for either platform.
+test-app test-directory-browser-ui sim build-sim sim-id: DERIVED = $(DERIVED_SIMULATOR)
 
 help: ## Show available targets
 	@awk -F':.*## ' '/^[a-z-]+:.*## / { printf "  make %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -45,10 +53,10 @@ build: generate ## Build Debug for a physical device without installing
 		-destination 'generic/platform=iOS' -derivedDataPath $(DERIVED) \
 		-allowProvisioningUpdates build
 
-test-app: generate ## Run the app test suite (SIM_DESTINATION, TEST_FLAGS)
+test-app: generate ## Run app tests and verify execution (SIM_DESTINATION, TEST_SELECTOR, TEST_FLAGS)
 	python3 scripts/run-app-simulator-tests.py -project $(PROJECT) -scheme $(SCHEME) \
 		-destination '$(SIM_DESTINATION)' -derivedDataPath $(DERIVED) \
-		$(TEST_FLAGS) test
+		test
 
 test: test-app ## Run the app and HeelerSSH unit test suites on a simulator
 	scripts/run-heelerssh-package-tests.sh '$(SIM_DESTINATION)'
@@ -63,9 +71,59 @@ test-directory-browser-ui: ## Check first Browse presentation (SIMULATOR_UDID, r
 test-ipad: ## Run the app and HeelerSSH unit test suites on the iPad simulator
 	$(MAKE) test SIM='$(SIM_IPAD)'
 
-test-ci-app: ## Run the committed-project CI app lane (no generate)
-	HEELER_CI_LANE=app HEELER_CI_SIMULATOR_UDID='$(or $(SIMULATOR_UDID),$(HEELER_CI_SIMULATOR_UDID))' \
+test-ci-app: ## Run the committed-project CI app lane (CI_APP_SHARD, no generate)
+	HEELER_CI_LANE=app HEELER_CI_APP_SHARD='$(CI_APP_SHARD)' \
+		HEELER_CI_SIMULATOR_UDID='$(or $(SIMULATOR_UDID),$(HEELER_CI_SIMULATOR_UDID))' \
 		scripts/run-ci-ios-tests.sh
+
+test-ci-package: ## Run the committed-project CI SSH package lane (SIMULATOR_UDID)
+	HEELER_CI_LANE=package HEELER_CI_SIMULATOR_UDID='$(or $(SIMULATOR_UDID),$(HEELER_CI_SIMULATOR_UDID))' \
+		scripts/run-ci-ios-tests.sh
+
+.PHONY: test-ci-diagnostics test-ci-diagnostic-controls test-weak-network-proxy
+test-ci-diagnostics: ## Diagnose one scenario (HEELER_CI_DIAGNOSTIC_TARGET, optional iterations)
+	@test -n "$$HEELER_CI_DIAGNOSTIC_TARGET" || { echo "HEELER_CI_DIAGNOSTIC_TARGET is required" >&2; exit 2; }
+	HEELER_CI_LANE=app scripts/run-ci-ios-tests.sh
+
+test-weak-network-proxy: ## Test real TCP impairment, buffering, and proxy cleanup
+	python3 scripts/test-weak-network-proxy.py
+
+test-ci-diagnostic-controls: ## Verify diagnostic isolation and execution guards without Xcode
+	bash scripts/test-ci-ios-diagnostics.sh
+
+check-agent-docs: ## Check navigation links and unique ADR numbers
+	python3 scripts/check-agent-docs.py
+
+check-test-membership: ## Check that the committed project compiles every app test source
+	python3 scripts/check-test-target-membership.py
+
+test-tools: check-agent-docs check-test-membership ## Test agent tooling without Xcode or a simulator
+	python3 scripts/test-native-test-lifecycle.py
+	python3 scripts/test-check-agent-docs.py
+	python3 scripts/test-check-test-target-membership.py
+	python3 scripts/test-run-app-simulator-tests.py
+	python3 scripts/test-simulator-ui.py
+	$(MAKE) test-ci-evidence
+	$(MAKE) test-weak-network-proxy
+	$(MAKE) test-ci-diagnostic-controls
+
+test-ci-evidence: ## Test shard evidence, parameter cases, and skip provenance
+	python3 scripts/test-verify-ci-ios-evidence.py
+
+test-ci-guards: ## Test CI gate assertions without building the app (macOS)
+	scripts/test-run-ci-ios-tests-guards.sh
+
+test-ci-background-build: ## Test owned background build failure and cancellation
+	python3 scripts/test-run-ci-background-build.py
+
+test-ci-watchdog: test-ci-background-build ## Test the CI watchdog and simulator recovery (macOS)
+	scripts/test-run-with-timeout.sh
+
+test-ci-recovery: ## Test simulator recovery with fake Xcode processes (macOS)
+	scripts/test-ci-simulator-recovery.sh
+
+simulator-ui: ## Inspect simulator GUI capabilities (optional SIMULATOR_UDID)
+	python3 scripts/simulator-ui.py $(if $(SIMULATOR_UDID),--udid '$(SIMULATOR_UDID)')
 
 .PHONY: test-device-discovery
 test-device-discovery: ## Test physical-device selection and explicit overrides

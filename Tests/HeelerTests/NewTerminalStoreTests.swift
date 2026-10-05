@@ -121,6 +121,20 @@ struct NewTerminalStoreTests {
             ])
     }
 
+    @Test func windowsHomeAndBrowsedDirectoryArePassedThroughToCreation() async {
+        let recorder = Recorder()
+        let store = makeStore(home: #"C:\Users\dev"#, recorder: recorder)
+        store.selectNewWorkspace()
+        await store.submit()
+        store.applyBrowsedDirectory("D:/Projects/new workspace")
+        await store.submit()
+        #expect(recorder.destinations == [
+            .newWorkspace(NewWorkspaceSpec(directory: #"C:\Users\dev"#, label: nil), tabLabel: nil),
+            .newWorkspace(NewWorkspaceSpec(directory: "D:/Projects/new workspace", label: nil), tabLabel: nil),
+        ])
+        #expect(recorder.homeProbes == 1)
+    }
+
     @Test func unusableHomeFailsBeforeCreating() async {
         let recorder = Recorder()
         let store = makeStore(directories: [:], home: "relative", recorder: recorder)

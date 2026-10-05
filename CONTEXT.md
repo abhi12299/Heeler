@@ -274,6 +274,9 @@ _Avoid_: subscribe, enable push
 
 **Transport**:
 The app-side abstraction that executes herdr API requests and delivers event streams over SSH. UI code talks to Transport, never to SSH primitives.
+Unix Hosts use direct-streamlocal channels. Native Windows Hosts use herdr's
+official API bridge over SSH exec; their live terminals use its framed terminal
+controller. Both remain behind the same Transport abstraction (ADR 0018).
 _Avoid_: client, bridge, tunnel
 
 **Host Connection Status**:

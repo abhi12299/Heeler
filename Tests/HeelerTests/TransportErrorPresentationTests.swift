@@ -15,9 +15,7 @@ struct TransportErrorPresentationTests {
     }
 
     private static let homebrewPATH =
-        "Homebrew installs are often at /opt/homebrew/bin or /home/linuxbrew/.linuxbrew/bin — "
-        + "put that directory on the account's non-interactive PATH, "
-        + "or symlink herdr into ~/.local/bin."
+        "Put herdr's install directory on the account's non-interactive SSH PATH."
 
     private static let socketGuidance =
         "herdr is not running on this Host. If it is running, check SSH stream-local forwarding."

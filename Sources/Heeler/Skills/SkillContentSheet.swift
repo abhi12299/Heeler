@@ -73,7 +73,12 @@ struct SkillContentSheet: View {
     }
 
     private static func message(for error: any Error) -> String {
-        switch error {
+        if let transportError = error as? TransportError,
+            case .hostFeatureUnavailable = transportError
+        {
+            return transportError.presentation.message
+        }
+        return switch error {
         case TransportError.sshUnreachable:
             "The Host is not connected."
         case TransportError.timedOut:

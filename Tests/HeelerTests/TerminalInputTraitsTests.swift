@@ -8,7 +8,8 @@ import Testing
 // A terminal must never autocorrect: with suggestions on, Space accepts
 // the suggestion AND sends the raw key — the PTY gets double input.
 // These tests pin every correction trait to `.no` in both text-input
-// styles, plus Composer/terminal parity (see AgentComposerUITextView).
+// styles, plus the Composer traits the terminal shares and the correction
+// it alone keeps (see AgentComposerUITextView).
 
 @MainActor
 @Suite("Terminal input traits")
@@ -68,18 +69,19 @@ struct TerminalInputTraitsTests {
     }
 
     /// The Composer shares first responder with the terminal across the
-    /// Direct Input handoff; both sides must carry the same no-correction
-    /// traits or UIKit rebuilds the keyboard mid-transfer. This is the
-    /// parity AgentDirectInputTests asserts from the outside; pinned
-    /// here at the trait level so a future Composer change cannot
-    /// silently re-open the QuickType gap on one side only.
-    @Test func composerInputMatchesTerminalCorrectionTraits() {
+    /// Direct Input handoff. Its local draft autocorrects and spell checks;
+    /// the terminal must not, so only those two traits differ. Every other
+    /// trait matches, which keeps one keyboard context across the transfer,
+    /// and smart punctuation stays off on both sides for code in prompts.
+    @Test func composerAutocorrectsWhileSharingTheTerminalsOtherTraits() {
         let terminal = TerminalScreenView.makeConfiguredTerminal()
         terminal.setTextInputStyle(.naturalLanguage)
         let composer = AgentComposerUITextView()
 
-        #expect(composer.autocorrectionType == terminal.autocorrectionType)
-        #expect(composer.spellCheckingType == terminal.spellCheckingType)
+        #expect(composer.autocorrectionType == .yes)
+        #expect(composer.spellCheckingType == .yes)
+        #expect(terminal.autocorrectionType == .no)
+        #expect(terminal.spellCheckingType == .no)
         #expect(composer.smartQuotesType == terminal.smartQuotesType)
         #expect(composer.smartDashesType == terminal.smartDashesType)
         #expect(
