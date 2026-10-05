@@ -135,4 +135,36 @@ struct HostOnboardingPresentationTests {
         #expect(connectingStanding.footerMessage == nil)
         #expect(connectingStanding.connectionErrorMessage == failure.presentation.message)
     }
+
+    /// The Console never prompts for trust: once onboarding pins the key and
+    /// the preflight passes, a Console failed on that key retries once.
+    @Test func passingPreflightRetriesOnlyAConsoleFailedOnHostKeyTrust() {
+        let key = HostKeyFingerprint(publicKeyBlob: Data("presented".utf8))
+        let rejected = TransportError.hostKeyRejected(presented: key)
+        let mismatch = TransportError.hostKeyMismatch(
+            known: HostKeyFingerprint(publicKeyBlob: Data("known".utf8)), presented: key)
+        let rows: [(Bool, EventsSessionStatus?, Bool, HostOnboardingConsoleRecovery.Action)] = [
+            (true, .failed(rejected), false, .retry),
+            (true, .failed(mismatch), false, .retry),
+            (true, .failed(.jumpHostFailed(rejected)), false, .retry),
+            // A manual Reconnect is already retrying: decide after it.
+            (true, .failed(rejected), true, .wait),
+            // The Console has not settled yet.
+            (true, .connecting, false, .wait),
+            (true, .reconnecting(attempt: 1, delay: .seconds(1), failure: .timedOut), false, .wait),
+            // Any other settled state spends the proof without a retry.
+            (true, .connected, false, .disarm),
+            (true, .failed(.authenticationFailed), false, .disarm),
+            (true, .failed(.jumpHostFailed(.authenticationFailed)), false, .disarm),
+            (true, .suspended, false, .disarm),
+            (true, nil, false, .disarm),
+            // No passing preflight to act on.
+            (false, .failed(rejected), false, .wait),
+        ]
+        for (isArmed, status, inFlight, expected) in rows {
+            let input = HostOnboardingConsoleRecovery.Input(
+                isArmed: isArmed, status: status, isManualReconnectInFlight: inFlight)
+            #expect(HostOnboardingConsoleRecovery.action(for: input) == expected)
+        }
+    }
 }

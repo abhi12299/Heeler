@@ -167,4 +167,73 @@ struct HostDraftTests {
         draft.authMethod = .password
         #expect(!draft.canSave(editing: keyHost))
     }
+
+    @Test func duplicateCopiesEveryFieldUnderACopyNameAsANewHost() throws {
+        let original = Host(
+            id: UUID(), name: "laya-train", address: "100.64.0.7", port: 2201,
+            username: "dev", authMethod: .rsaKey, sessionName: "work",
+            jumpAddress: "jump.example", jumpPort: 2022, jumpUsername: "tunnel")
+
+        let draft = HostDraft(
+            duplicating: original, password: nil, existingNames: ["laya-train"])
+        let copy = try #require(draft.makeHost())
+
+        #expect(copy.id != original.id)
+        #expect(copy == Host(
+            id: copy.id, name: "laya-train copy", address: "100.64.0.7", port: 2201,
+            username: "dev", authMethod: .rsaKey, sessionName: "work",
+            jumpAddress: "jump.example", jumpPort: 2022, jumpUsername: "tunnel"))
+        #expect(draft.canSave(editing: nil))
+    }
+
+    @Test func duplicateCarriesThePasswordOnlyForPasswordHosts() {
+        let passwordHost = Host.fixture(authMethod: .password)
+        let copied = HostDraft(
+            duplicating: passwordHost, password: "hunter2", existingNames: [])
+        #expect(copied.password == "hunter2")
+        #expect(copied.passwordUpdate == "hunter2")
+        #expect(copied.canSave(editing: nil))
+
+        // An unreadable stored password leaves the copy unsavable until
+        // one is entered, as for any new password Host.
+        let unread = HostDraft(duplicating: passwordHost, password: nil, existingNames: [])
+        #expect(unread.password.isEmpty)
+        #expect(!unread.canSave(editing: nil))
+
+        let keyHost = Host.fixture(authMethod: .deviceKey)
+        let keyCopy = HostDraft(duplicating: keyHost, password: "stale", existingNames: [])
+        #expect(keyCopy.password.isEmpty)
+    }
+
+    @Test func duplicateNameFollowsFinder() {
+        #expect(HostDraft.duplicateName(of: "box", existingNames: ["box"]) == "box copy")
+        #expect(
+            HostDraft.duplicateName(of: "box", existingNames: ["box", "box copy"])
+                == "box copy 2")
+        #expect(
+            HostDraft.duplicateName(
+                of: "box", existingNames: ["box", "box copy", "box copy 2", "box copy 4"])
+                == "box copy 3")
+        // Duplicating a copy continues its series.
+        #expect(
+            HostDraft.duplicateName(of: "box copy", existingNames: ["box", "box copy"])
+                == "box copy 2")
+        #expect(
+            HostDraft.duplicateName(
+                of: "box copy 2", existingNames: ["box", "box copy", "box copy 2"])
+                == "box copy 3")
+        // A number without the copy marker belongs to the name.
+        #expect(HostDraft.duplicateName(of: "ubuntu 22", existingNames: []) == "ubuntu 22 copy")
+        #expect(HostDraft.duplicateName(of: "copy", existingNames: []) == "copy copy")
+    }
+
+    @Test func duplicateOfAnUnnamedHostCopiesItsDisplayName() throws {
+        let original = Host.fixture(name: "", address: "box.example", username: "dev")
+
+        let draft = HostDraft(
+            duplicating: original, password: nil,
+            existingNames: [original.displayName])
+
+        #expect(try #require(draft.makeHost()).displayName == "dev@box.example copy")
+    }
 }

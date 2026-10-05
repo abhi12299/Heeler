@@ -20,6 +20,13 @@ struct HostRemovalRequest: Equatable {
         + "from the Keychain. This cannot be undone."
 }
 
+/// One Duplicate form presentation, identified per request so duplicating
+/// the same Host again presents a fresh, renumbered draft.
+private struct HostDuplicateRequest: Identifiable {
+    let id = UUID()
+    let draft: HostDraft
+}
+
 @MainActor
 @Observable
 final class HostRemovalStore {
@@ -85,6 +92,7 @@ struct HostListView: View {
     @State private var removal: HostRemovalStore
     @State private var isAddingHost = false
     @State private var editingHost: Host?
+    @State private var duplicateRequest: HostDuplicateRequest?
     /// State, not `@AppStorage`: a defaults write lands outside the toggle's
     /// animation, so the group would snap shut.
     @State private var collapsedGroups: Set<HostHealthGroup>
@@ -242,6 +250,18 @@ struct HostListView: View {
             .sheet(item: $editingHost) { host in
                 HostFormView(store: store, editing: host)
             }
+            // A copy is a new Host: like Add, it lands in onboarding, the only
+            // place a first connection to a new endpoint can be trusted.
+            .sheet(
+                item: $duplicateRequest,
+                onDismiss: {
+                    navigateToPendingOnboardingHostIfNeeded()
+                }
+            ) { request in
+                HostFormView(store: store, prefill: request.draft) { saved in
+                    pendingOnboardingHostID = saved.id
+                }
+            }
             .alert(
                 removal.pendingRequest?.title ?? "Remove Host?",
                 isPresented: removalConfirmationPresented,
@@ -352,10 +372,22 @@ struct HostListView: View {
         }
         .contextMenu {
             Button("Edit", systemImage: "pencil") { editingHost = host }
+            Button("Duplicate", systemImage: "plus.square.on.square") { duplicate(host) }
             Button("Remove Host", systemImage: "trash", role: .destructive) {
                 removal.requestRemoval([host.id])
             }
         }
+    }
+
+    private func duplicate(_ host: Host) {
+        // An unreadable password only costs the prefill: the form then
+        // requires one before saving.
+        let password = host.authMethod == .password ? try? store.password(for: host) : nil
+        duplicateRequest = HostDuplicateRequest(
+            draft: HostDraft(
+                duplicating: host,
+                password: password,
+                existingNames: store.hosts.map(\.displayName)))
     }
 
     private func navigateToPendingOnboardingHostIfNeeded() {

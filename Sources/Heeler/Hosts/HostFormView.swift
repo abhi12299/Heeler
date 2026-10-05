@@ -30,6 +30,15 @@ struct HostFormView: View {
         _draft = State(initialValue: editing.map(HostDraft.init) ?? HostDraft())
     }
 
+    /// Adds a new Host starting from `prefill`, as Duplicate does: saving
+    /// never touches the Host the draft was copied from.
+    init(store: HostStore, prefill: HostDraft, onSaved: ((Host) -> Void)? = nil) {
+        self.store = store
+        self.editing = nil
+        self.onSaved = onSaved
+        _draft = State(initialValue: prefill)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
