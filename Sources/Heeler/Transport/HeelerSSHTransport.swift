@@ -691,6 +691,21 @@ actor HeelerSSHTransport: Transport {
         return SkillProbe.skills(fromProbeOutput: output, sources: resolved)
     }
 
+    /// Transcripts are found under POSIX paths; a native Windows Host has
+    /// none this search can read. The script rides the same bounded `sh -s`
+    /// exec as a git read, so a hung grep cannot hold a channel.
+    func searchTranscripts(_ request: TranscriptSearchRequest) async throws -> [TranscriptSearchHit] {
+        guard !isWindowsHost, let script = TranscriptSearchProbe.script(for: request) else {
+            return []
+        }
+        do {
+            let result = try await runGitScript(script)
+            return TranscriptSearchProbe.hits(fromOutput: result.stdout, query: request.query)
+        } catch TransportError.gitTimedOut {
+            throw TransportError.timedOut
+        }
+    }
+
     func readSkillFile(atPath path: String) async throws -> String {
         try await requirePOSIXHost(feature: "Skills")
         guard let quoted = RemoteShellPath.quotedAbsolute(path) else {

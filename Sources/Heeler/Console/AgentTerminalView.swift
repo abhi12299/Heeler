@@ -203,6 +203,9 @@ struct AgentTerminalView: View {
     /// Edge-docked Workspace navigation; nil where the detail cannot route
     /// to other terminals.
     private let workspaceDrawer: WorkspaceTerminalDrawer?
+    /// Edge-docked search across every running Agent; nil where the detail
+    /// cannot route to other Agents.
+    private let agentSearchDrawer: AgentSearchDrawer?
     /// Follows the Agent's own session file for the usage strip (#325).
     @State private var sessionUsage = AgentSessionUsageStore()
     @State private var attach: AgentAttachStore
@@ -316,6 +319,7 @@ struct AgentTerminalView: View {
         retainedSurface: TerminalSurfaceRetention? = nil,
         onRetainDeparture: ((_ keepingKeyboard: Bool) -> Void)? = nil,
         workspaceDrawer: WorkspaceTerminalDrawer? = nil,
+        agentSearchDrawer: AgentSearchDrawer? = nil,
         inheritsKeyboardHandoff: Bool = true,
         interactionProbe: AgentTerminalInteractionProbe? = nil
     ) {
@@ -344,6 +348,7 @@ struct AgentTerminalView: View {
         self.retainedSurface = retainedSurface
         self.onRetainDeparture = onRetainDeparture
         self.workspaceDrawer = workspaceDrawer
+        self.agentSearchDrawer = agentSearchDrawer
         _attach = State(
             initialValue: attachStore ?? AgentAttachStore(
                 target: agent.agent.paneID,
@@ -1027,6 +1032,16 @@ struct AgentTerminalView: View {
                 AgentEdgeBackGesture {
                     if let revealDetailSidebar { revealDetailSidebar() } else { dismiss() }
                 }
+            }
+        }
+        // Above the edge gesture, which would otherwise take the tab's taps;
+        // the tab hands a horizontal drag back to it.
+        .overlay {
+            if var agentSearchDrawer {
+                let _ = agentSearchDrawer.onBackSwipe = showsBackHeader ? nil : {
+                    if let revealDetailSidebar { revealDetailSidebar() } else { dismiss() }
+                }
+                agentSearchDrawer.palette(themePalette)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {

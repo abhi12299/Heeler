@@ -236,6 +236,13 @@ protocol Transport: Sendable {
     /// the whole file on every look.
     func readFileSlice(_ range: RemoteFileRange) async throws -> RemoteFileSlice
 
+    /// Searches the session transcripts of the Agents named in `request`,
+    /// which are the ones running now, and returns the latest matching
+    /// message of each. One script over one exec; no other session stored on
+    /// the Host is read. Transports without a Host process environment find
+    /// nothing by default.
+    func searchTranscripts(_ request: TranscriptSearchRequest) async throws -> [TranscriptSearchHit]
+
     /// The context window, in tokens, of the model an Agent's session names
     /// as `provider/model`, as the Agent's own CLI on the Host reports it.
     /// `nil` when the CLI is absent or does not know the model; a session
@@ -312,6 +319,11 @@ extension Transport {
     func readFileSlice(_ range: RemoteFileRange) async throws -> RemoteFileSlice {
         throw TransportError.channelFailed(
             detail: "This transport cannot read Host files.")
+    }
+
+    /// A transport without Host commands has no transcripts to search.
+    func searchTranscripts(_ request: TranscriptSearchRequest) async throws -> [TranscriptSearchHit] {
+        []
     }
 
     /// A transport without Host commands knows no model windows.

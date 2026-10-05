@@ -91,6 +91,14 @@ final class ConsoleStore {
     let sidebarSnapshots = HerdrSidebarSnapshotStore()
     let terminalConnections: TerminalConnectionPool
     let agentTerminals: AgentTerminalCache
+    /// One Agent search for the whole Console, so a query and its results
+    /// are still there after a result switched to another Agent.
+    @ObservationIgnored private(set) lazy var agentSearch = AgentSearchStore(
+        agents: { [weak self] in self?.agents ?? [] },
+        search: { [weak self] hostID, request in
+            guard let self else { return [] }
+            return try await self.searchTranscripts(request, on: hostID)
+        })
     @ObservationIgnored private var terminalSnapshotRevisions: [Host.ID: UInt64] = [:]
     @ObservationIgnored private var terminalTransportGenerations: [Host.ID: UInt64] = [:]
 
@@ -698,6 +706,14 @@ final class ConsoleStore {
             "herdr rejected the close: \(message)"
         default:
             "Closing failed: \(error)"
+        }
+    }
+
+    func searchTranscripts(
+        _ request: TranscriptSearchRequest, on hostID: Host.ID
+    ) async throws -> [TranscriptSearchHit] {
+        try await projection(for: hostID).session.withTransport { transport in
+            try await transport.searchTranscripts(request)
         }
     }
 

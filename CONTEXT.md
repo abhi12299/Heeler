@@ -122,6 +122,17 @@ _Avoid_: diff, source control, Agent's changes, project changes
 The native dashboard surface, split into Agents, Terminals, Hosts, and Settings tabs; the two lists share one Host filter, and each hides its own search field until pulled down. Agents lists Agents across Hosts as either a flat list or a by-Host grouped list with collapsible sections, opening Agent detail; grouping is independent of Agent ordering and Pin priority. Terminals lists ordinary shell Panes as one card per Workspace, By Workspace or nested By Host, opening Shell Terminal. Hosts is Host management. The Console reopens the list tab it last showed. On an iPad beside its sidebar the tabs give way to the sidebar: a switch between the two lists at its top, Hosts and Settings as sheets from its foot, and each list's search behind a button there.
 _Avoid_: dashboard, home
 
+**Agent Search**:
+The panel docked to the leading edge of an Agent's terminal, opposite the
+Workspace drawer. It lists every running Agent across Workspaces and Hosts
+and narrows the list by a query matched against what an Agent row shows and
+against the Agents' own session transcripts on the Host. Only the transcripts
+of Agents running now are read, each found by the session id herdr reports;
+sessions stored beside them are never searched. Transcript matches exist for
+Claude Code Agents only. A match switches to the Agent's live terminal, not
+to the matched message.
+_Avoid_: global search, history search, session search
+
 **Agent Row Layout**:
 The ordered rows of fields that identify an Agent in the Console and its
 switcher. Each Host follows its herdr plugin's fields until the user saves
