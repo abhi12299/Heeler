@@ -24,8 +24,12 @@ private final class ScriptedDictationEngine: DictationEngine {
         return stream
     }
 
+    /// What the recogniser delivers as its final transcript once stopped.
+    var finalTranscript: String?
+
     func stop() {
         stopCount += 1
+        if let finalTranscript { continuation?.yield(finalTranscript) }
         continuation?.finish()
     }
 
@@ -143,6 +147,57 @@ struct AgentComposerDictationTests {
         #expect(store.state == .failed(error.message))
         #expect(store.failureMessage == error.message)
         #expect(draft.text == "untouched")
+    }
+
+    /// Send clears the draft; the recogniser's closing transcript must not
+    /// put the sent words back.
+    @Test func discardingKeepsALateFinalTranscriptOutOfTheDraft() async {
+        let engine = ScriptedDictationEngine()
+        engine.finalTranscript = "Ship it now."
+        let store = ComposerDictationStore(engine: engine)
+        let draft = Draft("")
+
+        begin(store, in: draft)
+        await settle { store.state == .listening }
+        engine.hear("ship it")
+        await settle { draft.text == "ship it" }
+        draft.text = ""
+        store.discard()
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(draft.text == "")
+        #expect(store.state == .idle)
+        #expect(engine.stopCount == 1)
+    }
+
+    @Test func stoppingByHandKeepsTheFinalTranscript() async {
+        let engine = ScriptedDictationEngine()
+        engine.finalTranscript = "Ship it now."
+        let store = ComposerDictationStore(engine: engine)
+        let draft = Draft("")
+
+        begin(store, in: draft)
+        await settle { store.state == .listening }
+        store.stop()
+        await settle { store.state == .idle }
+
+        #expect(draft.text == "Ship it now.")
+    }
+
+    @Test func aNewDictationAfterDiscardStillWrites() async {
+        let engine = ScriptedDictationEngine()
+        let store = ComposerDictationStore(engine: engine)
+        let draft = Draft("")
+
+        begin(store, in: draft)
+        await settle { store.state == .listening }
+        store.discard()
+        begin(store, in: draft)
+        await settle { store.state == .listening }
+        engine.hear("again")
+        await settle { draft.text == "again" }
+
+        #expect(draft.text == "again")
     }
 
     @Test func stoppingWhenIdleDoesNothing() {

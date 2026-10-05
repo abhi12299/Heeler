@@ -48,6 +48,8 @@ final class ComposerDictationStore {
     private(set) var state: State = .idle
     @ObservationIgnored private let engine: any DictationEngine
     @ObservationIgnored private var session: Task<Void, Never>?
+    /// Identifies the dictation whose transcripts may still reach the draft.
+    @ObservationIgnored private var generation = 0
 
     init(engine: any DictationEngine) {
         self.engine = engine
@@ -73,24 +75,29 @@ final class ComposerDictationStore {
             return
         }
         state = .starting
+        generation += 1
+        let generation = generation
         let insertion = Insertion(draft: draft, selection: selection)
         session = Task { [weak self, engine] in
             do {
                 let transcripts = try await engine.start()
-                guard let self, self.state == .starting else {
+                guard let self, self.generation == generation, self.state == .starting else {
                     engine.stop()
                     return
                 }
                 self.state = .listening
-                for await transcript in transcripts {
+                for await transcript in transcripts where self.generation == generation {
                     let (text, caret) = insertion.applying(transcript)
                     apply(text, caret)
                 }
+                guard self.generation == generation else { return }
                 self.state = .idle
             } catch let error as DictationError {
-                self?.state = .failed(error.message)
+                guard let self, self.generation == generation else { return }
+                self.state = .failed(error.message)
             } catch {
-                self?.state = .failed(DictationError.unavailable.message)
+                guard let self, self.generation == generation else { return }
+                self.state = .failed(DictationError.unavailable.message)
             }
         }
     }
@@ -100,6 +107,16 @@ final class ComposerDictationStore {
         if state == .starting {
             state = .idle
         }
+        engine.stop()
+    }
+
+    /// Ends dictation and drops whatever the recogniser still delivers. The
+    /// draft has moved on — it was sent, or its screen left — and a late
+    /// final transcript must not be written back into it.
+    func discard() {
+        guard isActive else { return }
+        generation += 1
+        state = .idle
         engine.stop()
     }
 

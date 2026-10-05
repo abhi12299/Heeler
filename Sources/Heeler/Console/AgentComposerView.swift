@@ -365,7 +365,7 @@ struct AgentComposerView: View {
                 setKeyboardPresentation(.hidden)
             }
         }
-        .onDisappear { dictation.stop() }
+        .onDisappear { dictation.discard() }
         .onChange(of: store.draft) { _, _ in
             guard let skills else { return }
             if suggestionTrigger == nil {
@@ -444,7 +444,7 @@ struct AgentComposerView: View {
     private func deliverDraft(
         _ deliver: () async -> AgentComposerStore.SendResult
     ) async {
-        dictation.stop()
+        dictation.discard()
         let result = await deliver()
         guard result == .deliveredViaAttach else { return }
         var transaction = Transaction()
