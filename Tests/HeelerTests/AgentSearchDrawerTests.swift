@@ -9,16 +9,18 @@ import UIKit
 struct AgentSearchDrawerTests {
     private static let host = UUID()
 
-    private static func agent(_ pane: String, name: String, session: String) -> ConsoleAgent {
+    private static func agent(
+        _ pane: String, name: String?, session: String, kind: String = "claude"
+    ) -> ConsoleAgent {
         ConsoleAgent(
             hostID: host,
             hostName: "mac",
             agent: Agent(
-                terminalID: "term-\(pane)", kind: "claude", title: "", status: .working,
+                terminalID: "term-\(pane)", kind: kind, title: "", status: .working,
                 workspaceID: String(pane.prefix(2)), tabID: "\(pane):t", paneID: pane,
                 cwd: "/srv/app", revision: 0, name: name,
                 agentSession: AgentSessionInfo(
-                    agent: "claude", kind: .id, source: "herdr:claude", value: session)),
+                    agent: kind, kind: .id, source: "herdr:\(kind)", value: session)),
             workspaceLabel: "space-\(pane.prefix(2))",
             repositoryCheckout: nil)
     }
@@ -30,6 +32,21 @@ struct AgentSearchDrawerTests {
         #expect(!AgentSearchDrawer.isBackSwipe(CGSize(width: 40, height: 0)))
         #expect(!AgentSearchDrawer.isBackSwipe(CGSize(width: 90, height: 80)))
         #expect(!AgentSearchDrawer.isBackSwipe(CGSize(width: -90, height: 0)))
+    }
+
+    /// Two Agents in one Tab share its place name, so a row leads with the
+    /// Agent's own name and says which kind it is beside where it runs.
+    @Test func aRowLeadsWithTheAgentsOwnNameAndSaysItsKind() {
+        let named = Self.agent("w1:p1", name: "elephants", session: "s-1", kind: "codex")
+        let unnamed = Self.agent("w1:p2", name: nil, session: "s-2")
+
+        let namedLabels = AgentSearchDrawer.labels(for: named, location: "heeler · cg")
+        let unnamedLabels = AgentSearchDrawer.labels(for: unnamed, location: "heeler · cg")
+
+        #expect(namedLabels.title == "elephants")
+        #expect(namedLabels.detail == "codex · heeler · cg")
+        #expect(unnamedLabels.title == "claude")
+        #expect(unnamedLabels.detail == "heeler · cg")
     }
 
     @Test func thePanelFitsWhatTheKeyboardLeaves() {
@@ -56,7 +73,7 @@ struct AgentSearchDrawerTests {
                 store: store, selectedAgentID: agents[0].id,
                 edgeDock: EdgeDockSettings(defaults: try #require(
                     UserDefaults(suiteName: "AgentSearchDrawerTests.\(UUID().uuidString)"))),
-                title: { $0.agent.displayName },
+                location: { $0.workspaceLabel ?? "" },
                 onSelect: { selected.append($0) }))
         controller.safeAreaRegions = []
         let window = try await makeTestWindow(

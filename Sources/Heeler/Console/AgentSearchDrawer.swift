@@ -13,8 +13,8 @@ struct AgentSearchDrawer: View {
     let selectedAgentID: ConsoleAgent.ID
     let edgeDock: EdgeDockSettings
     var palette: TerminalThemePalette = .system
-    /// A row's name, as the Agent switcher shows it.
-    let title: (ConsoleAgent) -> String
+    /// Where an Agent runs, as the Agent switcher names it.
+    let location: (ConsoleAgent) -> String
     var onSelect: (ConsoleAgent.ID) -> Void
     /// Set where the screen's own leading-edge gesture lies under the tab.
     var onBackSwipe: (() -> Void)? = nil
@@ -263,8 +263,9 @@ struct AgentSearchDrawer: View {
 
     private func row(_ item: AgentSearchStore.Row) -> some View {
         let selected = item.agent.id == selectedAgentID
-        let name = title(item.agent)
-        let context = Self.context(for: item.agent)
+        let labels = Self.labels(for: item.agent, location: location(item.agent))
+        let name = labels.title
+        let context: String? = labels.detail.isEmpty ? nil : labels.detail
         return Button {
             // Collapse first: a retained Agent surface survives the switch
             // and would otherwise come back with the panel still open.
@@ -283,6 +284,7 @@ struct AgentSearchDrawer: View {
                         .font(.subheadline)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        .layoutPriority(1)
                     Spacer(minLength: 4)
                     if let context {
                         Text(context)
@@ -315,9 +317,16 @@ struct AgentSearchDrawer: View {
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
-    /// Where the Agent runs, since the list spans Workspaces.
-    static func context(for agent: ConsoleAgent) -> String? {
-        agent.workspaceLabel ?? agent.repoName
+    /// A row's two labels. Several Agents can share a Tab and so a location,
+    /// which makes the Agent's own name the title; the detail says which
+    /// kind of Agent it is, unless the name already does, and where it runs.
+    static func labels(
+        for agent: ConsoleAgent, location: String
+    ) -> (title: String, detail: String) {
+        let title = agent.agent.displayName
+        let kind = agent.agent.kind
+        let parts = (kind == title ? [] : [kind]) + (location.isEmpty ? [] : [location])
+        return (title, parts.joined(separator: " · "))
     }
 
     /// The tab's surface, squared off on the leading edge it is docked to.

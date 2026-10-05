@@ -414,7 +414,7 @@ struct AgentDetailView: View {
             store: console.agentSearch,
             selectedAgentID: agent.id,
             edgeDock: terminal.edgeDock,
-            title: { [console] agent in
+            location: { [console] agent in
                 AgentCardPresentation(
                     agent: agent, layout: console.rowLayout(for: agent.hostID)
                 ).switcherTitle
