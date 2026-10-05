@@ -64,7 +64,7 @@ final class AgentSearchStore {
     }
 
     private func sessionKey(for agent: ConsoleAgent) -> SessionKey? {
-        agent.transcriptSessionID.map { SessionKey(hostID: agent.hostID, sessionID: $0) }
+        agent.transcriptSession.map { SessionKey(hostID: agent.hostID, sessionID: $0.id) }
     }
 
     /// Asks each Host for the current query. An answer that arrives after the
@@ -78,13 +78,13 @@ final class AgentSearchStore {
             isSearching = false
             return
         }
-        var sessions: [(hostID: Host.ID, ids: [String])] = []
+        var sessions: [(hostID: Host.ID, sessions: [TranscriptSession])] = []
         for agent in agents() {
-            guard let id = agent.transcriptSessionID else { continue }
+            guard let session = agent.transcriptSession else { continue }
             if let index = sessions.firstIndex(where: { $0.hostID == agent.hostID }) {
-                sessions[index].ids.append(id)
+                sessions[index].sessions.append(session)
             } else {
-                sessions.append((agent.hostID, [id]))
+                sessions.append((agent.hostID, [session]))
             }
         }
         isSearching = true
@@ -92,9 +92,9 @@ final class AgentSearchStore {
         let answers = await withTaskGroup(
             of: (Host.ID, [TranscriptSearchHit]?).self
         ) { group in
-            for (hostID, ids) in sessions {
+            for (hostID, sessions) in sessions {
                 group.addTask {
-                    let request = TranscriptSearchRequest(query: needle, sessionIDs: ids)
+                    let request = TranscriptSearchRequest(query: needle, sessions: sessions)
                     return (hostID, try? await search(hostID, request))
                 }
             }

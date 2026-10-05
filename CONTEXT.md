@@ -129,7 +129,7 @@ and narrows the list by a query matched against what an Agent row shows and
 against the Agents' own session transcripts on the Host. Only the transcripts
 of Agents running now are read, each found by the session id herdr reports;
 sessions stored beside them are never searched. Transcript matches exist for
-Claude Code Agents only. A match switches to the Agent's live terminal, not
+Claude Code and Codex Agents; other kinds match by what their row shows. A match switches to the Agent's live terminal, not
 to the matched message.
 _Avoid_: global search, history search, session search
 

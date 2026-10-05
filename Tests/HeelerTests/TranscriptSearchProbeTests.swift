@@ -35,7 +35,7 @@ struct TranscriptSearchProbeTests {
     private static func output(_ sections: [(String, [String])]) -> Data {
         var text = ""
         for (session, lines) in sections {
-            text += "@@heeler-session \(session)\n"
+            text += "@@heeler-session claude \(session)\n"
             text += lines.map { $0 + "\n" }.joined()
             text += "\n"
         }
@@ -88,10 +88,76 @@ struct TranscriptSearchProbeTests {
         #expect(TranscriptSearchProbe.hits(fromOutput: output, query: "relay").isEmpty)
     }
 
-    private static func script(_ query: String, _ sessionIDs: [String]) -> String? {
-        TranscriptSearchProbe.script(
-            for: TranscriptSearchRequest(query: query, sessionIDs: sessionIDs)
+    private static func script(
+        _ query: String, _ sessionIDs: [String], codex: [String] = []
+    ) -> String? {
+        let sessions = sessionIDs.map { TranscriptSession(source: .claude, id: $0) }
+            + codex.map { TranscriptSession(source: .codex, id: $0) }
+        return TranscriptSearchProbe.script(
+            for: TranscriptSearchRequest(query: query, sessions: sessions)
         ).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    private static func codexLine(role: String, _ text: String) -> String {
+        let object: [String: Any] = [
+            "timestamp": "2026-10-05T09:59:10.000Z",
+            "type": "response_item",
+            "payload": [
+                "type": "message", "role": role,
+                "content": [["type": role == "assistant" ? "output_text" : "input_text", "text": text]],
+            ],
+        ]
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+            let text = String(data: data, encoding: .utf8)
+        else { return "" }
+        return text
+    }
+
+    private static func codexOutput(_ session: String, _ lines: [String]) -> Data {
+        Data(("@@heeler-session codex \(session)\n" + lines.map { $0 + "\n" }.joined()).utf8)
+    }
+
+    @Test func aCodexMessageBecomesAHitForItsSession() {
+        let output = Self.codexOutput(Self.second, [
+            Self.codexLine(role: "user", "is the relay up?"),
+            Self.codexLine(role: "assistant", "The relay answered on the second try."),
+        ])
+
+        let hits = TranscriptSearchProbe.hits(fromOutput: output, query: "relay")
+
+        #expect(hits == [
+            TranscriptSearchHit(
+                sessionID: Self.second, role: .assistant,
+                snippet: "The relay answered on the second try.")
+        ])
+    }
+
+    /// Codex records what it was told about the machine as messages too;
+    /// nobody typed those.
+    @Test func whatCodexWasToldAboutTheHostIsNotAHit() {
+        let output = Self.codexOutput(Self.second, [
+            Self.codexLine(role: "developer", "Always keep the relay healthy."),
+            Self.codexLine(
+                role: "user", "<environment_context>\n  <cwd>/srv/relay</cwd>\n</environment_context>"),
+            Self.codexLine(
+                role: "user",
+                "# AGENTS.md instructions for /srv/relay\n\n<INSTRUCTIONS>\nMind the relay.\n</INSTRUCTIONS>"),
+        ])
+
+        #expect(TranscriptSearchProbe.hits(fromOutput: output, query: "relay").isEmpty)
+    }
+
+    /// Each kind keeps its transcripts in its own place; a session is only
+    /// looked for where its own Agent writes.
+    @Test func eachAgentKindIsSearchedInItsOwnFiles() throws {
+        let script = try #require(Self.script("relay", [Self.first], codex: [Self.second]))
+
+        let claude = try #require(script.range(of: "for id in \(Self.first); do"))
+        let codex = try #require(script.range(of: "for id in \(Self.second); do"))
+        #expect(script[claude.upperBound..<codex.lowerBound].contains("/projects/*/\"$id\".jsonl"))
+        #expect(script[codex.upperBound...].contains("/sessions/*/*/*/rollout-*-\"$id\".jsonl"))
+        #expect(!script[codex.upperBound...].contains("/projects/"))
     }
 
     /// Only the running Agents' own files are opened: each is found by its
