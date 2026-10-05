@@ -239,6 +239,14 @@ final class SilentAudioKeepAlive: BackgroundKeepAlive {
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.restartIfWanted() }
             })
+        // Dictation borrows the shared session for recording and hands it
+        // back as silent playback.
+        observers.append(
+            center.addObserver(
+                forName: SpeechDictationEngine.audioSessionReleased, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.restartIfWanted() }
+            })
     }
 
     func start() {

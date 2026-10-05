@@ -9,9 +9,9 @@ Entries reference the issue that motivated them.
 
 ### Added
 
-- A Dictate button in the Composer: it focuses the draft with the system
-  keyboard already listening, so you can speak a message with Apple's own
-  dictation. It needs dictation enabled in iOS Settings.
+- A Dictate button in the Composer: tap it and speak, and Apple's speech
+  recognition writes what you say into the draft at the cursor. Tap again to
+  stop. It asks for microphone and speech recognition access the first time.
 - Background Alerts for the free Apple ID build, which cannot receive push:
   Heeler stays running in the background on a silent, mixable audio session
   and posts Agent Notifications itself when an Agent finishes or needs input.

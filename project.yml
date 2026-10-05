@@ -84,6 +84,8 @@ targets:
         CURRENT_PROJECT_VERSION: "24"
         # Scan to Pair (#62) reads the Pairing Code QR from the computer screen.
         INFOPLIST_KEY_NSCameraUsageDescription: "Heeler uses the camera to scan the Pairing Code shown on your computer, so you can add that machine without typing anything."
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Heeler uses the microphone when you tap Dictate, to turn what you say into the message you are writing."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Heeler uses speech recognition when you tap Dictate, to turn what you say into the message you are writing."
         # Only exempt encryption is used (standard SSH algorithms via the
         # HeelerSSH package's libssh2/OpenSSL, OS-provided CryptoKit);
         # declaring it here keeps every TestFlight upload from stalling on the

@@ -142,9 +142,7 @@ struct AgentComposerView: View {
     /// removing the token arms them again.
     @State private var isSuggestionsDismissed = false
     @State private var isDropTargeted = false
-    /// Bumped by the Dictate button; the text view starts system dictation
-    /// once per new value.
-    @State private var dictationRequest = 0
+    @State private var dictation = ComposerDictationStore(engine: SpeechDictationEngine())
 
     private var isToolsKeyboardPresented: Bool {
         keyboardPresentation == .tools
@@ -183,7 +181,6 @@ struct AgentComposerView: View {
                                 selectedRange: store.draftSelection,
                                 onEdit: { store.applyEditorDraft($0, selection: $1) },
                                 isFocused: $isInputFocused,
-                                dictationRequest: dictationRequest,
                                 keyboardPresentation: keyboardPresentation,
                                 keyboardHandoffID: keyboardHandoffID,
                                 isKeyboardHandoffCurrent: isKeyboardHandoffCurrent,
@@ -217,6 +214,13 @@ struct AgentComposerView: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
                             }
+                        }
+
+                        if let message = dictation.failureMessage {
+                            Label(message, systemImage: "mic.slash")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
                         }
 
                         HStack(spacing: 8) {
@@ -281,18 +285,21 @@ struct AgentComposerView: View {
                                     .accessibilityHidden(true)
                             }
                             Button {
-                                beginDictation()
+                                dictation.toggle(
+                                    draft: store.draft, selection: store.draftSelection
+                                ) { store.applyEditorDraft($0, selection: $1) }
                             } label: {
-                                Image(systemName: "mic")
+                                Image(systemName: dictation.isActive ? "mic.fill" : "mic")
                                     .font(.system(size: 15, weight: .semibold))
                                     .frame(width: 18, height: 18)
-                                    .accessibilityLabel("Dictate")
+                                    .accessibilityLabel(
+                                        dictation.isActive ? "Stop Dictation" : "Dictate")
                             }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.circle)
-                            .tint(secondaryActionTint)
+                            .tint(dictation.isActive ? .red : secondaryActionTint)
                             .frame(minWidth: 44, minHeight: 44)
-                            .accessibilityHint("Starts keyboard dictation into the draft")
+                            .accessibilityHint("Speaks text into the draft")
                             AgentComposerSendButton(
                                 isEnabled: store.canSend,
                                 accessibilityHint: store.sendAccessibilityHint
@@ -360,6 +367,7 @@ struct AgentComposerView: View {
                 setKeyboardPresentation(.hidden)
             }
         }
+        .onDisappear { dictation.stop() }
         .onChange(of: store.draft) { _, _ in
             guard let skills else { return }
             if suggestionTrigger == nil {
@@ -405,15 +413,6 @@ struct AgentComposerView: View {
         }
     }
 
-    /// Focuses the draft on the system keyboard with dictation already
-    /// listening. Falls back to the plain keyboard when the device has
-    /// dictation turned off.
-    private func beginDictation() {
-        dictationRequest += 1
-        setKeyboardPresentation(.system)
-        isInputFocused = true
-    }
-
     private func switchKeyboard() {
         let expectsSystemKeyboard = isToolsKeyboardPresented
         var transaction = Transaction()
@@ -435,6 +434,7 @@ struct AgentComposerView: View {
     private func deliverDraft(
         _ deliver: () async -> AgentComposerStore.SendResult
     ) async {
+        dictation.stop()
         let result = await deliver()
         guard result == .deliveredViaAttach else { return }
         var transaction = Transaction()
@@ -638,7 +638,6 @@ private struct AgentComposerTextEditor: UIViewRepresentable {
     let selectedRange: NSRange
     let onEdit: (String, NSRange) -> Void
     @Binding var isFocused: Bool
-    var dictationRequest = 0
     let keyboardPresentation: AgentComposerKeyboardPresentation
     let keyboardHandoffID: UUID?
     let isKeyboardHandoffCurrent: (UUID) -> Bool
@@ -674,10 +673,6 @@ private struct AgentComposerTextEditor: UIViewRepresentable {
         textView.onKeyboardHandoffSettled = onKeyboardHandoffSettled
         let shouldFocus = isFocused
         let coordinator = context.coordinator
-        if coordinator.dictationRequest != dictationRequest {
-            coordinator.dictationRequest = dictationRequest
-            textView.armDictation()
-        }
         coordinator.wantsFocus = shouldFocus
         guard shouldFocus != textView.isFirstResponder else { return }
         // Focus asked for before the view has a window is a keyboard
@@ -736,8 +731,6 @@ private struct AgentComposerTextEditor: UIViewRepresentable {
         /// The latest focus intent, from either SwiftUI or UIKit, so a
         /// deferred focus change can recheck it before acting.
         var wantsFocus = false
-        /// The last Dictate request acted on.
-        var dictationRequest = 0
         private var isFocused: Binding<Bool>
 
         init(onEdit: @escaping (String, NSRange) -> Void, isFocused: Binding<Bool>) {
@@ -788,54 +781,6 @@ final class AgentComposerUITextView: UITextView {
     /// and presenting it again a turn later. `HeelerTerminalView` claims an
     /// inherited keyboard the same way from `didMoveToWindow`.
     var claimsKeyboardWhenReady = false
-    /// The input modes dictation is looked up in; a seam for tests, since
-    /// the Simulator offers no dictation mode.
-    var availableInputModes: () -> [UITextInputMode] = { UITextInputMode.activeInputModes }
-    /// True from a Dictate request until the keyboard has taken it up.
-    private(set) var isDictationArmed = false
-    private var dictationDisarm: DispatchWorkItem?
-
-    /// UIKit has no call that starts keyboard dictation. It does ask the
-    /// first responder which input mode to open in, and the system lists
-    /// dictation among the active modes whenever the user has it enabled, so
-    /// answering with that mode opens the keyboard already listening.
-    override var textInputMode: UITextInputMode? {
-        if isDictationArmed, let dictation = Self.dictationMode(in: availableInputModes()) {
-            return dictation
-        }
-        return super.textInputMode
-    }
-
-    static func dictationMode(in modes: [UITextInputMode]) -> UITextInputMode? {
-        modes.first { $0.primaryLanguage == "dictation" }
-    }
-
-    /// Makes the next keyboard presentation open in dictation. An already
-    /// focused view reloads its keyboard now; otherwise the pending focus
-    /// change picks the mode up. The request lapses shortly after so later
-    /// focus changes open the ordinary keyboard.
-    func armDictation() {
-        isDictationArmed = true
-        dictationDisarm?.cancel()
-        let disarm = DispatchWorkItem { [weak self] in self?.isDictationArmed = false }
-        dictationDisarm = disarm
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dictationArmWindow, execute: disarm)
-        if isFirstResponder {
-            reloadInputViews()
-        }
-    }
-
-    static let dictationArmWindow: TimeInterval = 1.5
-
-    @discardableResult
-    override func resignFirstResponder() -> Bool {
-        let resigned = super.resignFirstResponder()
-        if resigned {
-            dictationDisarm?.cancel()
-            isDictationArmed = false
-        }
-        return resigned
-    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
