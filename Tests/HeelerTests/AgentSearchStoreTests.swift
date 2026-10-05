@@ -93,7 +93,10 @@ struct AgentSearchStoreTests {
         #expect(store.rows.map(\.agent.agent.paneID) == ["w2:p1"])
         #expect(store.rows.first?.snippet == "the relay restarted")
         #expect(hosts.requests(Self.mac) == [
-            TranscriptSearchRequest(query: "relay", sessionIDs: ["s-1", "s-2"])
+            TranscriptSearchRequest(query: "relay", sessions: [
+                TranscriptSession(source: .claude, id: "s-1"),
+                TranscriptSession(source: .claude, id: "s-2"),
+            ])
         ])
     }
 
@@ -110,9 +113,9 @@ struct AgentSearchStoreTests {
         #expect(store.rows.first?.snippet == nil)
     }
 
-    /// Only a Claude Agent's session id names a transcript this search can
+    /// A session id names a transcript only for the kinds this search can
     /// read; a Host with none is not asked at all.
-    @Test func onlyClaudeSessionIDsAreSearchedAndEachHostIsAskedForItsOwn() async {
+    @Test func eachHostIsAskedOnlyForTheSessionsItCanRead() async {
         let hosts = Hosts()
         let store = Self.store(
             [
@@ -120,14 +123,31 @@ struct AgentSearchStoreTests {
                 Self.agent("w1:p2", kind: "codex", session: "s-codex"),
                 Self.agent("w1:p3", kind: "omp", session: "/tmp/s.jsonl", sessionKind: .path),
                 Self.agent("w1:p4"),
-                Self.agent("w9:p1", host: Self.linux, kind: "codex", session: "s-other"),
+                Self.agent("w9:p1", host: Self.linux, kind: "gemini", session: "s-other"),
             ], hosts)
 
         store.query = "relay"
         await store.search()
 
-        #expect(hosts.requests(Self.mac).map(\.sessionIDs) == [["s-1"]])
+        #expect(hosts.requests(Self.mac).map(\.sessions) == [[
+            TranscriptSession(source: .claude, id: "s-1"),
+            TranscriptSession(source: .codex, id: "s-codex"),
+        ]])
         #expect(hosts.requests(Self.linux).isEmpty)
+    }
+
+    @Test func aCodexTranscriptHitKeepsItsAgent() async {
+        let hosts = Hosts()
+        hosts.answer(Self.mac, .success([Self.hit("s-codex", "the relay restarted")]))
+        let store = Self.store(
+            [Self.agent("w1:p1", session: "s-1"), Self.agent("w1:p2", kind: "codex", session: "s-codex")],
+            hosts)
+
+        store.query = "relay"
+        await store.search()
+
+        #expect(store.rows.map(\.agent.agent.paneID) == ["w1:p2"])
+        #expect(store.rows.first?.snippet == "the relay restarted")
     }
 
     @Test func anAnswerForAnOlderQueryIsDropped() async {

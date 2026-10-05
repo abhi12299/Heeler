@@ -12,7 +12,8 @@ Entries reference the issue that motivated them.
 - Agent Search: a translucent tab on the left edge of an Agent's terminal
   opens a list of every running Agent across Workspaces, with a field that
   searches their transcripts and shows the words around each match. Only the
-  transcripts of Agents running now are searched (Claude Code Agents); tap a
+  transcripts of Agents running now are searched (Claude Code and Codex
+  Agents); tap a
   row to switch to that Agent. Long-press the tab to move it along the edge;
   the back swipe from that edge still works.
 - A Dictate button in the Composer: tap it and speak, and Apple's speech

@@ -5,7 +5,25 @@ import Foundation
 /// is read.
 struct TranscriptSearchRequest: Sendable, Equatable {
     let query: String
-    let sessionIDs: [String]
+    let sessions: [TranscriptSession]
+}
+
+/// An Agent kind whose session transcripts this search can read on a Host:
+/// where the kind keeps them, and how one of its lines carries a message.
+enum TranscriptSource: String, Sendable, Equatable, CaseIterable {
+    case claude
+    case codex
+
+    /// The source for the Agent a herdr session reference names, if any.
+    init?(agent: String) {
+        self.init(rawValue: agent)
+    }
+}
+
+/// One running Agent's own session, as herdr reports it by id.
+struct TranscriptSession: Sendable, Equatable {
+    let source: TranscriptSource
+    let id: String
 }
 
 /// The latest message in one Agent's transcript that contains the query.
@@ -32,41 +50,47 @@ enum TranscriptSearchProbe {
 
     /// The script for one search, or nil when there is nothing to search.
     ///
-    /// Each session is opened by its file name under the Host's Claude
-    /// config directories, so the cost follows the running Agents and never
+    /// Each session is opened by its file name where its own Agent kind
+    /// keeps transcripts, so the cost follows the running Agents and never
     /// the sessions stored beside them. grep narrows each file to messages
     /// that hold the query inside a text value; `hits(fromOutput:query:)`
     /// has the last word on what counts.
     static func script(for request: TranscriptSearchRequest) -> Data? {
         let query = cleaned(request.query)
-        let sessionIDs = request.sessionIDs.filter(isPlainToken)
-        guard !query.isEmpty, !sessionIDs.isEmpty else { return nil }
+        let sessions = request.sessions.filter { isPlainToken($0.id) }
+        guard !query.isEmpty, !sessions.isEmpty else { return nil }
         let stored = jsonEscaped(query)
-        let pattern = #""(text|content)":"([^"\\]|\\.)*"# + patternEscaped(stored)
-        return Data("""
+        var script = """
             LC_ALL=C
             export LC_ALL
             q=\(singleQuoted(stored))
-            re=\(singleQuoted(pattern))
-            for id in \(sessionIDs.joined(separator: " ")); do
-              for f in "$HOME"/.claude*/projects/*/"$id".jsonl \\
-                "${CLAUDE_CONFIG_DIR:-/nonexistent}"/projects/*/"$id".jsonl; do
-                [ -f "$f" ] || continue
-                printf '\(sessionMarker)%s\\n' "$id"
-                grep -i -F -e "$q" -- "$f" \\
-                  | grep -E -e '"type":"(user|assistant)"' \\
-                  | grep -v -F -e '"tool_use_id"' -e '"type":"tool_use"' \\
-                      -e '"isMeta":true' -e '"isSidechain":true' \\
-                  | grep -i -E -e "$re" \\
-                  | tail -n \(linesPerSession) \\
-                  | sed -E 's/"data":"[A-Za-z0-9+\\/=]{64,}"/"data":""/g' \\
-                  | head -c \(bytesPerSession)
-                printf '\\n'
-                break
-              done
-            done
 
-            """.utf8)
+            """
+        for source in TranscriptSource.allCases {
+            let ids = sessions.filter { $0.source == source }.map(\.id)
+            guard !ids.isEmpty else { continue }
+            let pattern = source.textValuePattern + patternEscaped(stored)
+            let filters = source.messageFilters.map { "      | \($0) \\\n" }.joined()
+            script += """
+                re=\(singleQuoted(pattern))
+                for id in \(ids.joined(separator: " ")); do
+                  for f in \(source.fileGlobs.joined(separator: " ")); do
+                    [ -f "$f" ] || continue
+                    printf '\(sessionMarker)\(source.rawValue) %s\\n' "$id"
+                    grep -i -F -e "$q" -- "$f" \\
+                \(filters)\
+                      | grep -i -E -e "$re" \\
+                      | tail -n \(linesPerSession) \\
+                      | sed -E \(singleQuoted(source.inlineDataSubstitution)) \\
+                      | head -c \(bytesPerSession)
+                    printf '\\n'
+                    break
+                  done
+                done
+
+                """
+        }
+        return Data(script.utf8)
     }
 
     /// A session id is only ever a file name here, so anything that is not a
@@ -112,7 +136,7 @@ enum TranscriptSearchProbe {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return [] }
         var hits: [TranscriptSearchHit] = []
-        var sessionID: String?
+        var session: TranscriptSession?
         var latest: TranscriptSearchHit?
         func close() {
             if let latest { hits.append(latest) }
@@ -121,8 +145,13 @@ enum TranscriptSearchProbe {
         for line in String(decoding: output, as: UTF8.self).split(whereSeparator: \.isNewline) {
             if line.hasPrefix(sessionMarker) {
                 close()
-                sessionID = String(line.dropFirst(sessionMarker.count))
-            } else if let sessionID, let hit = hit(in: line, sessionID: sessionID, needle: needle) {
+                let fields = line.dropFirst(sessionMarker.count).split(separator: " ")
+                session = fields.count == 2
+                    ? TranscriptSource(rawValue: String(fields[0])).map {
+                        TranscriptSession(source: $0, id: String(fields[1]))
+                    }
+                    : nil
+            } else if let session, let hit = hit(in: line, session: session, needle: needle) {
                 latest = hit
             }
         }
@@ -131,37 +160,19 @@ enum TranscriptSearchProbe {
     }
 
     private static func hit(
-        in line: Substring, sessionID: String, needle: String
+        in line: Substring, session: TranscriptSession, needle: String
     ) -> TranscriptSearchHit? {
         guard
             let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-            object["isMeta"] as? Bool != true,
-            let role = role(of: object),
-            let message = object["message"] as? [String: Any]
+            let message = session.source.message(in: object)
         else { return nil }
-        for text in texts(in: message["content"]) {
+        for text in message.texts {
             if let snippet = snippet(of: text, around: needle) {
-                return TranscriptSearchHit(sessionID: sessionID, role: role, snippet: snippet)
+                return TranscriptSearchHit(
+                    sessionID: session.id, role: message.role, snippet: snippet)
             }
         }
         return nil
-    }
-
-    private static func role(of object: [String: Any]) -> TranscriptSearchHit.Role? {
-        switch object["type"] as? String {
-        case "user": .user
-        case "assistant": .assistant
-        default: nil
-        }
-    }
-
-    /// The prose in a message: a plain string, or its text blocks.
-    private static func texts(in content: Any?) -> [String] {
-        if let text = content as? String { return [text] }
-        guard let blocks = content as? [[String: Any]] else { return [] }
-        return blocks.compactMap { block in
-            block["type"] as? String == "text" ? block["text"] as? String : nil
-        }
     }
 
     /// A row has room for two short lines; the match sits near the start so
@@ -179,5 +190,105 @@ enum TranscriptSearchProbe {
         return (start > flat.startIndex ? "…" : "")
             + flat[start..<end].trimmingCharacters(in: .whitespaces)
             + (end < flat.endIndex ? "…" : "")
+    }
+}
+
+/// What each kind's transcript looks like, on the Host and line by line.
+extension TranscriptSource {
+    /// Where the kind writes a session, as shell globs over `$id`. Only the
+    /// file name varies, so no directory is ever walked.
+    var fileGlobs: [String] {
+        switch self {
+        case .claude:
+            [
+                #""$HOME"/.claude*/projects/*/"$id".jsonl"#,
+                #""${CLAUDE_CONFIG_DIR:-/nonexistent}"/projects/*/"$id".jsonl"#,
+            ]
+        case .codex:
+            [#""${CODEX_HOME:-$HOME/.codex}"/sessions/*/*/*/rollout-*-"$id".jsonl"#]
+        }
+    }
+
+    /// greps that keep only lines a person or the Agent wrote as prose.
+    var messageFilters: [String] {
+        switch self {
+        case .claude:
+            [
+                #"grep -E -e '"type":"(user|assistant)"'"#,
+                #"grep -v -F -e '"tool_use_id"' -e '"type":"tool_use"' -e '"isMeta":true' -e '"isSidechain":true'"#,
+            ]
+        case .codex:
+            [
+                #"grep -F -e '"type":"response_item","payload":{"type":"message"'"#,
+                #"grep -E -e '"role":"(user|assistant)"'"#,
+            ]
+        }
+    }
+
+    /// The start of a pattern that finds the query inside a JSON string
+    /// value holding message text.
+    var textValuePattern: String {
+        switch self {
+        case .claude: #""(text|content)":"([^"\\]|\\.)*"#
+        case .codex: #""text":"([^"\\]|\\.)*"#
+        }
+    }
+
+    /// Drops an attached image's bytes from a matching line before it is
+    /// sent back.
+    var inlineDataSubstitution: String {
+        switch self {
+        case .claude: #"s/"data":"[A-Za-z0-9+\/=]{64,}"/"data":""/g"#
+        case .codex: #"s/"image_url":"data:[^"]{64,}"/"image_url":""/g"#
+        }
+    }
+
+    /// The role and prose of a transcript line, or nil for a line that is
+    /// not a message somebody wrote.
+    func message(in object: [String: Any]) -> (role: TranscriptSearchHit.Role, texts: [String])? {
+        switch self {
+        case .claude:
+            guard
+                object["isMeta"] as? Bool != true,
+                let role = Self.role(object["type"] as? String),
+                let message = object["message"] as? [String: Any]
+            else { return nil }
+            if let text = message["content"] as? String { return (role, [text]) }
+            return (role, Self.texts(in: message["content"], ofTypes: ["text"]))
+        case .codex:
+            guard
+                object["type"] as? String == "response_item",
+                let payload = object["payload"] as? [String: Any],
+                payload["type"] as? String == "message",
+                let role = Self.role(payload["role"] as? String)
+            else { return nil }
+            let texts = Self.texts(in: payload["content"], ofTypes: ["input_text", "output_text"])
+            // Codex files what it was told about the Host as user messages,
+            // each wrapped in a tag of its own.
+            return (role, texts.filter { !Self.isInjectedContext($0) })
+        }
+    }
+
+    private static func role(_ name: String?) -> TranscriptSearchHit.Role? {
+        switch name {
+        case "user": .user
+        case "assistant": .assistant
+        default: nil
+        }
+    }
+
+    private static func texts(in content: Any?, ofTypes types: Set<String>) -> [String] {
+        guard let blocks = content as? [[String: Any]] else { return [] }
+        return blocks.compactMap { block in
+            (block["type"] as? String).map(types.contains) == true ? block["text"] as? String : nil
+        }
+    }
+
+    /// Text that opens with a lowercase tag, as `<environment_context>` does,
+    /// or with the project instructions Codex reads in at the start.
+    private static func isInjectedContext(_ text: String) -> Bool {
+        text.range(
+            of: #"^\s*(<[a-z_]+>|# AGENTS\.md instructions for )"#, options: .regularExpression
+        ) != nil
     }
 }
