@@ -1441,7 +1441,10 @@ struct AgentCardChangesTotalsTests {
         let store = try await Self.store(added: 1_234_567, removed: 1_234_567)
         let (controller, window) = try await Self.host(store, width: width)
         defer { window.isHidden = true }
-        let label = "Changes: 1,234,567 lines added, 1,234,567 lines removed"
+        // The label groups digits by the process locale, not the view's
+        // environment locale: "12,34,567" under an Indian region.
+        let count = 1_234_567.formatted()
+        let label = "Changes: \(count) lines added, \(count) lines removed"
         let elements = AccessibilityProbe.elements(labeled: label, in: controller.view)
         #expect(elements.count == 1)
         let element = try #require(elements.first)
