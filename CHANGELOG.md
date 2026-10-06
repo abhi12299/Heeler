@@ -9,6 +9,9 @@ Entries reference the issue that motivated them.
 
 ### Added
 
+- Agent Notifications read like herdr's desktop ones: `claude finished |
+  <session name>` (or `needs input`) over the workspace and tab, so parallel
+  Agents are told apart by their session name.
 - A Dictate button in the Composer: tap it and speak, and Apple's speech
   recognition writes what you say into the draft at the cursor. Tap again to
   stop. It asks for microphone and speech recognition access the first time.

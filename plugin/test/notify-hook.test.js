@@ -90,21 +90,31 @@ async function startFakeRelay(respond = () => ({ status: 200, body: { apnsId: "x
 /**
  * Write the HERDR_BIN_PATH stub: logs every invocation and answers the two
  * subcommands the hook runs, like the real herdr CLI does — `agent get` with
- * a canned status (or an agent_not_found error when status is null) and
- * `workspace get` with a canned label (or a failure when it is null).
+ * a canned status (or an agent_not_found error when status is null), and
+ * `workspace get` / `tab get` with a canned label (or a failure when it is
+ * null).
  */
 function writeHerdrStub({
   status,
   agent = "claude",
   title = undefined,
+  name = undefined,
   workspaceLabel = "Proj",
+  tabLabel = "1",
 }) {
   const binPath = join(stubDir, "herdr");
-  const agentInfo = { agent, agent_status: status, pane_id: PANE_ID, workspace_id: "w1" };
+  const agentInfo = {
+    agent,
+    agent_status: status,
+    pane_id: PANE_ID,
+    workspace_id: "w1",
+    tab_id: "w1:t1",
+  };
   if (title !== undefined) {
     agentInfo.terminal_title = `⠂ ${title}`;
     agentInfo.terminal_title_stripped = title;
   }
+  if (name !== undefined) agentInfo.name = name;
   const response = {
     agent:
       status === null
@@ -132,6 +142,19 @@ function writeHerdrStub({
                 workspace: { workspace_id: "w1", label: workspaceLabel },
                 type: "workspace_info",
               },
+            },
+            code: 0,
+          },
+    tab:
+      tabLabel === null
+        ? {
+            out: { error: { code: "tab_not_found", message: "no such tab" }, id: "x" },
+            code: 1,
+          }
+        : {
+            out: {
+              id: "cli:tab:get",
+              result: { tab: { tab_id: "w1:t1", label: tabLabel }, type: "tab_info" },
             },
             code: 0,
           },
@@ -350,6 +373,43 @@ suite("notify-hook: sending", () => {
     assert.equal(payload.title, "排查修复 split 按钮 UI 结构问题");
     // The label is resolved for the workspace the re-check reports.
     assert.deepEqual(stubInvocationsOf("workspace")[0].args, ["workspace", "get", "w1"]);
+  });
+
+  test("the payload carries the session name and the tab label", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([device()]);
+    writeHerdrStub({
+      status: "done",
+      title: "qa-overview-regression",
+      name: "qa-overview-regression",
+      workspaceLabel: "complyai",
+      tabLabel: "2",
+    });
+
+    const result = await runHook(statusEvent("done"));
+
+    assert.equal(result.status, 0, result.stderr);
+    const { payload } = decryptEnvelope(relay.requests[0].body.envelope, KEY_A);
+    assert.equal(payload.session, "qa-overview-regression");
+    assert.equal(payload.tab, "2");
+    // The label is resolved for the tab the re-check reports.
+    assert.deepEqual(stubInvocationsOf("tab")[0].args, ["tab", "get", "w1:t1"]);
+  });
+
+  test("an unnamed session and an unresolvable tab just omit both", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([device()]);
+    writeHerdrStub({ status: "done", title: "Daily task review", tabLabel: null });
+
+    const result = await runHook(statusEvent("done"));
+
+    assert.equal(result.status, 0, result.stderr);
+    const { payload } = decryptEnvelope(relay.requests[0].body.envelope, KEY_A);
+    assert.equal("session" in payload, false);
+    assert.equal("tab" in payload, false);
+    assert.equal(payload.title, "Daily task review");
   });
 
   test("a title longer than the display limit is trimmed with an ellipsis", async () => {

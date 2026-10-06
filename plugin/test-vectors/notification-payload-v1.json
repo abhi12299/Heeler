@@ -1,5 +1,5 @@
 {
-  "description": "Shared notification envelope v1 test vectors (ADR 0008). Single source of truth for the encrypted Agent Notification payload, consumed by both the Node plugin tests (encrypt direction) and the Swift app tests (decrypt direction). Envelopes were generated with raw AES-256-GCM calls, independent of both implementations, and resealed the same way when `paneId` values were updated to observed-family herdr identifiers (opaque alphanumeric `w…:p…` strings, uppercase included — not tmux-style `%N`). `key` is the 32-byte Notification Key and `keyId` its derived id, both unpadded base64url. `envelope` is the exact canonical envelope string; non-`decodeOnly` valid vectors must be reproduced byte-for-byte by the encrypt side. `decodeOnly: true` marks envelopes that must decrypt to `payload` but are not a canonical encoding of it. `project` and `title` are the optional display fields, omitted from the plaintext when absent. Invalid vectors must fail decryption with the given typed error.",
+  "description": "Shared notification envelope v1 test vectors (ADR 0008). Single source of truth for the encrypted Agent Notification payload, consumed by both the Node plugin tests (encrypt direction) and the Swift app tests (decrypt direction). Envelopes were generated with raw AES-256-GCM calls, independent of both implementations, and resealed the same way when `paneId` values were updated to observed-family herdr identifiers (opaque alphanumeric `w…:p…` strings, uppercase included — not tmux-style `%N`). `key` is the 32-byte Notification Key and `keyId` its derived id, both unpadded base64url. `envelope` is the exact canonical envelope string; non-`decodeOnly` valid vectors must be reproduced byte-for-byte by the encrypt side. `decodeOnly: true` marks envelopes that must decrypt to `payload` but are not a canonical encoding of it. `project`, `title`, `session` and `tab` are the optional display fields, omitted from the plaintext when absent. Invalid vectors must fail decryption with the given typed error.",
   "valid": [
     {
       "name": "blocked claude agent",
@@ -49,6 +49,22 @@
         "timestamp": 1753305600,
         "project": "Caterm",
         "title": "排查修复 split 按钮 UI 结构问题"
+      }
+    },
+    {
+      "name": "done agent with a session name and a tab label",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "keyId": "Yw3NKWbEM2Y",
+      "envelope": "{\"v\":1,\"kid\":\"Yw3NKWbEM2Y\",\"n\":\"MDEyMzQ1Njc4OTo7\",\"ct\":\"yBdBoYcKaDkIRL-qKOlvSrAFJD6tWmY_Bd09LZ3XGxxvQn8QTbTu1IweMC0VqLYPgm4pOgmL9BCUcVJncXphxHxEzv37w1JchDmjdAUAEbBQoFFqoekwq2ySV9dBaj2Zqpo5bzUKcWQ73jYiYZCbdEwXJzY-ZE_KQTXPxTY8Gc7JcKx0jixQasbIIhyA8adePWqIKQQ3or7NtGRyl4uVIT79aiIAen9dMq1oin3XgmTd_Fyf\"}",
+      "payload": {
+        "paneId": "w1F:pQ",
+        "agentKind": "claude",
+        "status": "done",
+        "timestamp": 1791331200,
+        "project": "complyai",
+        "title": "qa-overview-regression",
+        "session": "qa-overview-regression",
+        "tab": "2"
       }
     },
     {

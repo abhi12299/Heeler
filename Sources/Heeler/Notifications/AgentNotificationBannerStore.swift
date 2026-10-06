@@ -119,7 +119,8 @@ final class AgentNotificationBannerStore {
         let announcement = AgentNotificationBanner(
             target: target,
             alert: AgentNotificationRenderer.alert(
-                workspace: agent.workspaceLabel, agentKind: agent.agent.kind, status: status))
+                workspace: agent.workspaceLabel, tab: agent.tabLabel, session: agent.agent.name,
+                agentKind: agent.agent.kind, status: status))
         // In the background nobody is looking at the presented Agent, so
         // its suppression applies only to the in-app banner.
         if backgroundDelivery(announcement) { return }

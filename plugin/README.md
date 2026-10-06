@@ -348,8 +348,10 @@ plaintext is compact JSON:
 | `kind`   | string  | Agent kind as herdr reports it (`claude`, `codex`, ...). Non-empty. |
 | `status` | string  | The new Agent Status. An open set: decoders pass unrecognized values through. Non-empty. |
 | `ts`     | integer | Unix-seconds of the status transition. Positive. |
-| `project`| string  | Optional, display only: the workspace label the Agent runs in — the project name the app's alert leads with. Omitted when the Host cannot resolve it. At most 256 characters (the hook trims to 80 before encrypting). |
+| `project`| string  | Optional, display only: the workspace label the Agent runs in, which leads the alert's body. Omitted when the Host cannot resolve it. At most 256 characters (the hook trims to 80 before encrypting). |
 | `title`  | string  | Optional, display only: the Agent's terminal title with status glyphs stripped — what it is working on. Same absence and length rules as `project`. |
+| `session`| string  | Optional, display only: the Agent's herdr `name`, i.e. the session name (Claude Code's `/rename`). Ends the alert's title. Omitted for an unnamed session; same length rules as `project`. |
+| `tab`    | string  | Optional, display only: label of the tab the Agent runs in, which follows the workspace in the alert's body. Same absence and length rules as `project`. |
 
 A plaintext that is not JSON or violates these rules is rejected
 (`bad_payload`). Every rejection is a typed error on the app side; the
