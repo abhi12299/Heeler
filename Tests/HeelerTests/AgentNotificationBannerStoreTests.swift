@@ -50,14 +50,16 @@ struct AgentNotificationBannerStoreTests {
 
     private func agent(
         _ paneID: String, _ status: AgentStatus,
-        hostID: UUID? = nil, kind: String = "claude", workspaceLabel: String? = nil
+        hostID: UUID? = nil, kind: String = "claude", workspaceLabel: String? = nil,
+        tabLabel: String? = nil, name: String? = nil
     ) -> ConsoleAgent {
         ConsoleAgent(
             hostID: hostID ?? self.hostID, hostName: "mac-studio",
-            agent: Agent(.fixture(paneID: paneID, status: status, kind: kind)),
+            agent: Agent(.fixture(paneID: paneID, status: status, kind: kind, name: name)),
             workspaceLabel: workspaceLabel,
             repositoryCheckout: nil,
-            lastOutputSnippet: nil)
+            lastOutputSnippet: nil,
+            tabLabel: tabLabel)
     }
 
     /// Polls until `condition` holds, yielding so the store's tasks progress.
@@ -95,14 +97,13 @@ struct AgentNotificationBannerStoreTests {
             store.banner
                 == AgentNotificationBanner(
                     target: AgentNotificationTarget(hostID: hostID, paneID: "wV:p1"),
-                    alert: AgentNotificationAlert(
-                        title: "Claude", body: "Blocked — waiting for input")))
+                    alert: AgentNotificationAlert(title: "claude needs input", body: "")))
         #expect(world.soundCount == 1)
     }
 
-    /// The banner shares the push renderer, so a known workspace leads the
-    /// same way it does on a push.
-    @Test func aKnownWorkspaceLeadsTheBanner() async throws {
+    /// The banner shares the push renderer, so a known workspace fills the
+    /// body the same way it does on a push.
+    @Test func aKnownWorkspaceFillsTheBanner() async throws {
         world.triggers[hostID] = NotificationTriggerPreferences()
         let store = makeStore()
         store.agentsDidChange([agent("wV:p1", .working, workspaceLabel: "Caterm")])
@@ -112,8 +113,26 @@ struct AgentNotificationBannerStoreTests {
         try await waitUntil("the banner should show") { store.banner != nil }
         #expect(
             store.banner?.alert
-                == AgentNotificationAlert(
-                    title: "Caterm · Claude", body: "Blocked — waiting for input"))
+                == AgentNotificationAlert(title: "claude needs input", body: "Caterm"))
+    }
+
+    /// Same copy as the push: the session name in the title, workspace and
+    /// tab in the body.
+    @Test func theBannerNamesTheSessionAndTab() async throws {
+        world.triggers[hostID] = NotificationTriggerPreferences()
+        let store = makeStore()
+        let working = agent(
+            "wV:p1", .working, workspaceLabel: "complyai", tabLabel: "2", name: "fix-ci")
+        store.agentsDidChange([working])
+
+        store.agentsDidChange([
+            agent("wV:p1", .done, workspaceLabel: "complyai", tabLabel: "2", name: "fix-ci")
+        ])
+
+        try await waitUntil("the banner should show") { store.banner != nil }
+        #expect(
+            store.banner?.alert
+                == AgentNotificationAlert(title: "claude finished | fix-ci", body: "complyai · 2"))
     }
 
     @Test func doneTransitionBannersWithTheDoneCopy() async throws {
@@ -126,7 +145,7 @@ struct AgentNotificationBannerStoreTests {
         try await waitUntil("the Done banner should show") { store.banner != nil }
         #expect(
             store.banner?.alert
-                == AgentNotificationAlert(title: "Codex", body: "Done"))
+                == AgentNotificationAlert(title: "codex finished", body: ""))
     }
 
     /// The first sight of a pane is baseline, not a transition: a killed-state

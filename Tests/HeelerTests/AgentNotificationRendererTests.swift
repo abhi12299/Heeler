@@ -5,7 +5,8 @@ import Testing
 
 /// The service extension's whole job as a pure function: pick the right
 /// Notification Key by the envelope's kid, decrypt, and rewrite the alert to
-/// workspace, Agent kind, and status — or degrade to the generic fallback banner
+/// herdr's desktop format (kind, outcome and session name over workspace and
+/// tab) — or degrade to the generic fallback banner
 /// on any undecryptable push (#71). Envelopes come from the shared vectors,
 /// so this stays in lockstep with the plugin's encrypt direction.
 @Suite("Agent notification renderer")
@@ -23,9 +24,9 @@ struct AgentNotificationRendererTests {
         try #require(vectors.valid.first { $0.name == name })
     }
 
-    /// A payload from a plugin that predates the display fields: the copy
-    /// degrades to the friendly Agent kind and status rather than falling
-    /// back to the generic banner.
+    /// A payload from a plugin that predates the display fields: the title
+    /// still names the Agent kind and what happened, and the body is empty
+    /// rather than falling back to the generic banner.
     @Test func rewritesABlockedPushWithoutDisplayFields() throws {
         let vector = try Self.vector(named: "blocked claude agent")
         let record = try Self.record(forVector: vector, named: "mac-studio")
@@ -33,27 +34,40 @@ struct AgentNotificationRendererTests {
         let alert = AgentNotificationRenderer.alert(
             userInfo: ["envelope": vector.envelope], keys: [record])
 
-        #expect(alert.title == "Claude")
-        #expect(alert.body == "Blocked — waiting for input")
+        #expect(alert == AgentNotificationAlert(title: "claude needs input", body: ""))
     }
 
-    /// The shape the current plugin sends: the workspace leads, the friendly
-    /// Agent kind trails it, and the body carries status only.
-    @Test func leadsWithTheWorkspaceAndFriendlyAgentKind() throws {
+    /// The herdr desktop format: kind and outcome, then the session name in
+    /// the title; workspace and tab in the body.
+    @Test func namesTheSessionAndTheWorkspaceAndTab() throws {
+        let vector = try Self.vector(named: "done agent with a session name and a tab label")
+        let record = try Self.record(forVector: vector, named: "mac-studio")
+
+        let alert = AgentNotificationRenderer.alert(
+            userInfo: ["envelope": vector.envelope], keys: [record])
+
+        #expect(
+            alert
+                == AgentNotificationAlert(
+                    title: "claude finished | qa-overview-regression", body: "complyai · 2"))
+    }
+
+    /// A plugin that predates `session` and `tab` still leads the body with
+    /// the workspace.
+    @Test func aWorkspaceAloneFillsTheBody() throws {
         let vector = try Self.vector(named: "blocked agent with a project and a task title")
         let record = try Self.record(forVector: vector, named: "mac-studio")
 
         let alert = AgentNotificationRenderer.alert(
             userInfo: ["envelope": vector.envelope], keys: [record])
 
-        #expect(alert.title == "Caterm · Claude")
-        #expect(alert.body == "Blocked — waiting for input")
+        #expect(alert == AgentNotificationAlert(title: "claude needs input", body: "Caterm"))
     }
 
     /// The Host is the same machine on every notification and would spend the
     /// whole title on an address; it must never reach the alert.
     @Test func neverNamesTheHost() throws {
-        let vector = try Self.vector(named: "blocked agent with a project and a task title")
+        let vector = try Self.vector(named: "done agent with a session name and a tab label")
         let record = try Self.record(forVector: vector, named: "zingerbee@192.168.31.64")
 
         let alert = AgentNotificationRenderer.alert(
@@ -63,22 +77,26 @@ struct AgentNotificationRendererTests {
         #expect(!alert.body.contains("zingerbee"))
     }
 
+    /// The terminal title is what the Agent is doing, not its name; only the
+    /// session name reaches the alert.
     @Test func doesNotRenderTheTerminalTask() {
         let alert = AgentNotificationRenderer.alert(
-            workspace: "Heeler", agentKind: "codex", status: .done)
+            workspace: "Heeler", tab: nil, session: nil, agentKind: "codex", status: .done)
 
-        #expect(alert == AgentNotificationAlert(title: "Heeler · Codex", body: "Done"))
+        #expect(alert == AgentNotificationAlert(title: "codex finished", body: "Heeler"))
     }
 
-    @Test func namesMuseFriendly() {
+    @Test func aTabAloneFillsTheBody() {
         let alert = AgentNotificationRenderer.alert(
-            workspace: "Heeler", agentKind: "muse", status: .done)
+            workspace: nil, tab: "2", session: "fix-ci", agentKind: "claude", status: .blocked)
 
-        #expect(alert.title == "Heeler · Muse")
+        #expect(
+            alert == AgentNotificationAlert(title: "claude needs input | fix-ci", body: "2"))
     }
 
-    /// Every kind New Agent can launch gets an explicit label; the raw
-    /// protocol id is only the fallback for kinds Heeler does not know.
+    /// Live Activities still use the friendly identity: every kind New Agent
+    /// can launch gets an explicit label; the raw protocol id is only the
+    /// fallback for kinds Heeler does not know.
     @Test(arguments: SupportedAgentKind.allCases)
     func labelsEverySupportedKind(kind: SupportedAgentKind) {
         #expect(AgentNotificationIdentity.kindLabel(kind.rawValue) != kind.rawValue)
@@ -88,18 +106,18 @@ struct AgentNotificationRendererTests {
     /// that resolved a blank never renders a dangling separator.
     @Test func treatsBlankDisplayFieldsAsAbsent() {
         let alert = AgentNotificationRenderer.alert(
-            workspace: "  ", agentKind: "claude", status: .blocked)
+            workspace: "  ", tab: " ", session: "\n", agentKind: "claude", status: .blocked)
 
-        #expect(alert.title == "Claude")
-        #expect(alert.body == "Blocked — waiting for input")
+        #expect(alert == AgentNotificationAlert(title: "claude needs input", body: ""))
     }
 
     /// An unrecognized status still names itself factually.
     @Test func rendersAnUnrecognizedStatusFactually() {
         let alert = AgentNotificationRenderer.alert(
-            workspace: "heeler", agentKind: "claude", status: AgentStatus(rawValue: "exited"))
+            workspace: "heeler", tab: nil, session: nil, agentKind: "claude",
+            status: AgentStatus(rawValue: "exited"))
 
-        #expect(alert.body == "Status: exited")
+        #expect(alert.title == "claude exited")
     }
 
     @Test func rewritesADonePush() throws {
@@ -109,8 +127,7 @@ struct AgentNotificationRendererTests {
         let alert = AgentNotificationRenderer.alert(
             userInfo: ["envelope": vector.envelope], keys: [record])
 
-        #expect(alert.title == "Codex")
-        #expect(alert.body == "Done")
+        #expect(alert == AgentNotificationAlert(title: "codex finished", body: ""))
     }
 
     /// The status set is open on the wire; an unrecognized value must still
@@ -122,7 +139,7 @@ struct AgentNotificationRendererTests {
         let alert = AgentNotificationRenderer.alert(
             userInfo: ["envelope": vector.envelope], keys: [record])
 
-        #expect(alert.body == "Status: exited")
+        #expect(alert.title == "claude exited")
     }
 
     /// Several registered Hosts means several Notification Keys; the kid in
@@ -142,10 +159,8 @@ struct AgentNotificationRendererTests {
         let doneAlert = AgentNotificationRenderer.alert(
             userInfo: ["envelope": done.envelope], keys: records)
 
-        #expect(blockedAlert.title == "Claude")
-        #expect(blockedAlert.body == "Blocked — waiting for input")
-        #expect(doneAlert.title == "Codex")
-        #expect(doneAlert.body == "Done")
+        #expect(blockedAlert.title == "claude needs input")
+        #expect(doneAlert.title == "codex finished")
     }
 
     @Test func unknownKidFallsBackToTheGenericBanner() throws {

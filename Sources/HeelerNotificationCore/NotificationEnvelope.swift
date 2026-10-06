@@ -19,10 +19,16 @@ struct NotificationPayload: Sendable, Equatable {
     /// The Agent's terminal title, stripped of status glyphs: what the agent
     /// is working on. Nil under the same conditions as `project`.
     let title: String?
+    /// The Agent's herdr name: the session name, e.g. Claude Code's
+    /// `/rename`. Nil when the session is unnamed or the plugin predates it.
+    let session: String?
+    /// Label of the tab the Agent runs in. Nil under the same conditions as
+    /// `project`.
+    let tab: String?
 
     init(
         paneID: String, agentKind: String, status: AgentStatus, timestamp: Date,
-        project: String? = nil, title: String? = nil
+        project: String? = nil, title: String? = nil, session: String? = nil, tab: String? = nil
     ) {
         self.paneID = paneID
         self.agentKind = agentKind
@@ -30,6 +36,8 @@ struct NotificationPayload: Sendable, Equatable {
         self.timestamp = timestamp
         self.project = project
         self.title = title
+        self.session = session
+        self.tab = tab
     }
 }
 
@@ -136,7 +144,8 @@ enum NotificationEnvelope {
         return NotificationPayload(
             paneID: pane, agentKind: kind, status: AgentStatus(rawValue: status),
             timestamp: Date(timeIntervalSince1970: TimeInterval(timestamp)),
-            project: nonEmpty(wire.project), title: nonEmpty(wire.title))
+            project: nonEmpty(wire.project), title: nonEmpty(wire.title),
+            session: nonEmpty(wire.session), tab: nonEmpty(wire.tab))
     }
 
     private static func nonEmpty(_ text: String?) -> String? {
@@ -144,9 +153,9 @@ enum NotificationEnvelope {
         return text
     }
 
-    /// Decrypted JSON wire shape, lenient for the same reason. `project` and
-    /// `title` are the additive v1 display fields: absent from older plugins,
-    /// and never load-bearing for anything but copy.
+    /// Decrypted JSON wire shape, lenient for the same reason. `project`,
+    /// `title`, `session` and `tab` are the additive v1 display fields: absent
+    /// from older plugins, and never load-bearing for anything but copy.
     private struct WirePlaintext: Decodable {
         var pane: String?
         var kind: String?
@@ -154,6 +163,8 @@ enum NotificationEnvelope {
         var ts: Double?
         var project: String?
         var title: String?
+        var session: String?
+        var tab: String?
     }
 }
 

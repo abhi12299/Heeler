@@ -1,9 +1,8 @@
 import Foundation
 
-/// The compact Agent identity shared by alert notifications and Live
-/// Activities. Workspace labels distinguish parallel Agents; the friendly
-/// kind remains useful context without exposing terminal titles or custom
-/// Agent names.
+/// The compact Agent identity Live Activities show. Workspace labels
+/// distinguish parallel Agents; the friendly kind remains useful context
+/// without exposing terminal titles or custom Agent names.
 enum AgentNotificationIdentity {
     static func title(workspace: String?, kind: String) -> String {
         let kind = kindLabel(kind)

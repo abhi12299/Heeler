@@ -193,6 +193,8 @@ async function currentAgentStatus(binPath, paneId) {
     workspaceId: optionalText(agent.workspace_id),
     // Prefer the stripped title: the raw one carries herdr's spinner glyphs.
     title: optionalText(agent.terminal_title_stripped) ?? optionalText(agent.terminal_title),
+    session: optionalText(agent.name),
+    tabId: optionalText(agent.tab_id),
   };
 }
 
@@ -210,6 +212,22 @@ async function workspaceLabel(binPath, workspaceId) {
     const result = await runHerdr(binPath, ["workspace", "get", workspaceId]);
     if (result.code !== 0) return null;
     return optionalText(JSON.parse(result.stdout)?.result?.workspace?.label);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a tab's display label (`herdr tab get <id>` answers
+ * `{"result":{"tab":{"label":...}}}`; verified against herdr 0.9.3). Decorative
+ * like the workspace label, so every failure yields null.
+ */
+async function tabLabel(binPath, tabId) {
+  if (tabId === null) return null;
+  try {
+    const result = await runHerdr(binPath, ["tab", "get", tabId]);
+    if (result.code !== 0) return null;
+    return optionalText(JSON.parse(result.stdout)?.result?.tab?.label);
   } catch {
     return null;
   }
@@ -319,6 +337,8 @@ async function main() {
     timestamp,
     project: forDisplay(await workspaceLabel(binPath, workspaceId)),
     title: forDisplay(current.title ?? event.title),
+    session: forDisplay(current.session),
+    tab: forDisplay(await tabLabel(binPath, current.tabId)),
   };
   const pruned = new Set();
   const failures = [];
