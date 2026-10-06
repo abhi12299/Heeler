@@ -295,6 +295,10 @@ struct ConsoleTerminalInventoryTests {
         store.setHosts([host])
         await store.resume()
         try await waitUntil { store.terminals.count == 1 }
+        // Startup re-snapshots once the replacement subscription is
+        // acknowledged. Gating before that follow-up starts lets it land after
+        // the gated response and restore the stale scripted pane.
+        try await waitUntil { await transport.snapshotFetchCount >= 2 }
         let gate = ScriptedTransportCallGate()
         await transport.setSnapshot(snapshot(panes: [pane("shell")], workspaceLabel: "Renamed"))
         await transport.gateNextSnapshot(using: gate)
