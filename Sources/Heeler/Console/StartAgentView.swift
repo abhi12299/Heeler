@@ -16,6 +16,7 @@ struct StartAgentView: View {
     init(
         hosts: [Host], console: ConsoleStore,
         origin: StartAgentStore.LaunchOrigin? = nil,
+        preset: StartAgentStore.LaunchPreset? = nil,
         onStarted: @escaping (ConsoleAgent.ID) -> Void
     ) {
         self.onStarted = onStarted
@@ -46,7 +47,8 @@ struct StartAgentView: View {
                     }
                 },
                 awaitAgentVisible: { await console.waitForAgent($0) },
-                origin: origin))
+                origin: origin,
+                preset: preset))
     }
 
     var body: some View {

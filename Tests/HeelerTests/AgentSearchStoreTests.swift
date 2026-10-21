@@ -69,6 +69,76 @@ struct AgentSearchStoreTests {
         }
     }
 
+    @Test func transcriptHitsNameTheirAgentsForTheCurrentQueryOnly() async {
+        let hosts = Hosts()
+        hosts.answer(Self.mac, .success([Self.hit("s-2", "the relay restarted")]))
+        let quiet = Self.agent("w1:p1", session: "s-1")
+        let matched = Self.agent("w2:p1", session: "s-2")
+        let store = Self.store([quiet, matched], hosts)
+
+        store.query = "relay"
+        await store.search()
+        #expect(Array(store.transcriptHits.keys) == [matched.id])
+        #expect(store.transcriptHits[matched.id]?.snippet == "the relay restarted")
+
+        // A newer query hides the old answer until its own lands.
+        store.query = "other"
+        #expect(store.transcriptHits.isEmpty)
+    }
+
+    @Test func transcriptsAreAwaitedFromTheFirstKeystrokeUntilTheirAnswerLands() async throws {
+        let hosts = Hosts()
+        let sleeper = ChangesManualSleeper()
+        let store = AgentSearchStore(
+            agents: { [Self.agent("w1:p1", session: "s-1")] },
+            search: { host, request in try hosts.search(host, request) },
+            sleep: { try await sleeper.sleep($0) })
+        #expect(!store.isAwaitingTranscripts)
+
+        // Waiting out the typing pause counts: the list must not claim
+        // "No Results" while the Hosts have not been asked yet.
+        store.query = "relay"
+        #expect(store.isAwaitingTranscripts)
+        let settling = Task { await store.searchAfterTypingSettles() }
+        while await sleeper.durations.count < 1 { await Task.yield() }
+        #expect(store.isAwaitingTranscripts)
+        await sleeper.fireAll()
+        await settling.value
+        #expect(!store.isAwaitingTranscripts)
+
+        store.query = "relay "
+        #expect(!store.isAwaitingTranscripts)
+        store.query = ""
+        #expect(!store.isAwaitingTranscripts)
+    }
+
+    @Test func typingAsksTheHostsOnlyOnceItHasSettledForASecond() async throws {
+        let hosts = Hosts()
+        let sleeper = ChangesManualSleeper()
+        let store = AgentSearchStore(
+            agents: { [Self.agent("w1:p1", session: "s-1")] },
+            search: { host, request in try hosts.search(host, request) },
+            sleep: { try await sleeper.sleep($0) })
+
+        store.query = "rel"
+        let superseded = Task { await store.searchAfterTypingSettles() }
+        while await sleeper.durations.count < 1 { await Task.yield() }
+        // A keystroke inside the second cancels the wait it started.
+        superseded.cancel()
+        await superseded.value
+        #expect(hosts.requests(Self.mac).isEmpty)
+
+        store.query = "relay"
+        let settled = Task { await store.searchAfterTypingSettles() }
+        while await sleeper.durations.count < 2 { await Task.yield() }
+        #expect(hosts.requests(Self.mac).isEmpty)
+        await sleeper.fireAll()
+        await settled.value
+
+        #expect(await sleeper.durations == [.seconds(1), .seconds(1)])
+        #expect(hosts.requests(Self.mac).map(\.query) == ["relay"])
+    }
+
     @Test func anEmptyQueryListsEveryRunningAgentAcrossWorkspaces() async {
         let hosts = Hosts()
         let store = Self.store(

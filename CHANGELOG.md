@@ -9,6 +9,15 @@ Entries reference the issue that motivated them.
 
 ### Added
 
+- Agents by Workspace: the Agents tab's presentation menu adds By Workspace,
+  one collapsible section per Workspace as on the Terminals tab. Rows there
+  show only each Agent's name and path. Each section ends in New Agent,
+  which opens New Agent with that Host and Workspace already chosen.
+- Searching the Agents tab also searches running Agents' transcripts (Claude
+  Code and Codex Agents), a second after typing stops, and shows the words
+  around each transcript match under its row. A spinner shows while
+  transcripts are being searched, in place of "No Results" until they answer.
+  Agent Search's panel now waits the same second.
 - Agent Search: a translucent tab on the left edge of an Agent's terminal
   opens a list of every running Agent across Workspaces, with a field that
   searches their transcripts and shows the words around each match. Only the

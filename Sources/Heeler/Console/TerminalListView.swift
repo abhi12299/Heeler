@@ -143,7 +143,7 @@ struct TerminalListView: View {
     /// One By Host Workspace: its header, then its card's rows.
     @ViewBuilder
     private func workspaceRows(_ workspace: TerminalWorkspaceGroup) -> some View {
-        TerminalWorkspaceHeader(
+        WorkspaceSectionHeader(
             workspace: workspace, showsHost: false, isNested: true,
             onToggle: { toggle(workspace.id) }
         )
@@ -206,7 +206,7 @@ struct TerminalListView: View {
                     .listRowBackground(cardSlice(isSelected: false))
             }
         } header: {
-            TerminalWorkspaceHeader(
+            WorkspaceSectionHeader(
                 workspace: workspace,
                 showsHost: showsHost,
                 onToggle: { toggle(workspace.id) })
@@ -534,9 +534,16 @@ private struct TerminalCardRow: ViewModifier {
 }
 
 /// A Workspace card's header: name, a quiet Host, and the chevron that
-/// collapses the card. New Terminal lives in the card itself.
-private struct TerminalWorkspaceHeader: View {
-    let workspace: TerminalWorkspaceGroup
+/// collapses the card. New Terminal lives in the card itself. The Agents
+/// tab's By Workspace sections share it, so a Workspace reads alike on both.
+struct WorkspaceSectionHeader: View {
+    let title: String
+    let hostName: String
+    /// What the section holds; shown beside a collapsed header.
+    let itemCount: Int
+    let isCollapsed: Bool
+    /// What VoiceOver hears for the header's value.
+    let accessibilityValue: String
     let showsHost: Bool
     /// Under a Host header, a level below it: a quieter title, so the two
     /// headers never read as peers.
@@ -545,8 +552,8 @@ private struct TerminalWorkspaceHeader: View {
 
     private var detail: String? {
         var parts: [String] = []
-        if showsHost { parts.append(workspace.hostName) }
-        if workspace.isCollapsed { parts.append(String(workspace.terminals.count)) }
+        if showsHost { parts.append(hostName) }
+        if isCollapsed { parts.append(String(itemCount)) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
@@ -555,7 +562,7 @@ private struct TerminalWorkspaceHeader: View {
         // toggles and the chevron takes the trailing, thumb-side slot.
         Button(action: onToggle) {
             HStack(spacing: 6) {
-                Text(workspace.title)
+                Text(title)
                     .font(.subheadline.weight(isNested ? .medium : .semibold))
                     .foregroundStyle(isNested ? Color.secondary : Color.primary)
                 if let detail {
@@ -567,7 +574,7 @@ private struct TerminalWorkspaceHeader: View {
                 Image(systemName: "chevron.right")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(Color.secondary)
-                    .rotationEffect(.degrees(workspace.isCollapsed ? 0 : 90))
+                    .rotationEffect(.degrees(isCollapsed ? 0 : 90))
                     // The Host header's chevron width, so both line up; the
                     // whole row is the tap target.
                     .frame(width: 12)
@@ -581,12 +588,25 @@ private struct TerminalWorkspaceHeader: View {
         .hoverEffect(.highlight)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            showsHost ? "\(workspace.title), \(workspace.hostName)" : workspace.title)
-        .accessibilityValue(workspace.headerAccessibilityValue)
+            showsHost ? "\(title), \(hostName)" : title)
+        .accessibilityValue(accessibilityValue)
         .accessibilityHint(
-            workspace.isCollapsed ? "Expands this Workspace." : "Collapses this Workspace.")
+            isCollapsed ? "Expands this Workspace." : "Collapses this Workspace.")
         .accessibilityAddTraits(.isHeader)
         .textCase(nil)
+    }
+}
+
+extension WorkspaceSectionHeader {
+    init(
+        workspace: TerminalWorkspaceGroup, showsHost: Bool, isNested: Bool = false,
+        onToggle: @escaping () -> Void
+    ) {
+        self.init(
+            title: workspace.title, hostName: workspace.hostName,
+            itemCount: workspace.terminals.count, isCollapsed: workspace.isCollapsed,
+            accessibilityValue: workspace.headerAccessibilityValue, showsHost: showsHost,
+            isNested: isNested, onToggle: onToggle)
     }
 }
 

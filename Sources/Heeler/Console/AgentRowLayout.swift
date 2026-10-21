@@ -156,6 +156,9 @@ struct AgentRowLayout: Codable, Equatable, Sendable {
     ])
     /// Fallback sidebar fields with Heeler's default directory row.
     static let consoleDefault = heelerDefault.withHeelerRow()
+    /// A By Workspace row: its section header already names the Workspace
+    /// and Host, so the row keeps to the Agent's name and its path.
+    static let workspaceSection = AgentRowLayout(rows: [[.init(.agent)], [.init(.directory)]])
 
     var rowGap: Int
     var rows: [AgentRow]

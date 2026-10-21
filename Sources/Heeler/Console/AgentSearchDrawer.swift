@@ -25,8 +25,6 @@ struct AgentSearchDrawer: View {
     static let headerHeight: CGFloat = 36
     static let fieldHeight: CGFloat = 36
     static let maxPanelHeight: CGFloat = 392
-    /// Typing settles for this long before a Host is asked.
-    static let searchDelay: Duration = .milliseconds(350)
     /// How far a drag travels before it counts as a back swipe, matching the
     /// screen's own edge gesture.
     static let backSwipeTravel: CGFloat = 72
@@ -214,11 +212,7 @@ struct AgentSearchDrawer: View {
         .accessibilityLabel("Agent search")
         // Typing settles before the Hosts are asked; a newer query cancels
         // the wait, and the store drops an answer that lands late.
-        .task(id: store.query) {
-            try? await Task.sleep(for: Self.searchDelay)
-            guard !Task.isCancelled else { return }
-            await store.search()
-        }
+        .task(id: store.query) { await store.searchAfterTypingSettles() }
     }
 
     private var field: some View {

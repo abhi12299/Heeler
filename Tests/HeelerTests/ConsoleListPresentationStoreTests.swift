@@ -219,3 +219,214 @@ struct AgentCardPresentationTests {
             workspaceLabel: workspace, repositoryCheckout: nil)
     }
 }
+
+@MainActor
+@Suite("Console list By Workspace")
+struct ConsoleWorkspaceSectionsTests {
+    private func makeDefaults() throws -> (UserDefaults, cleanup: () -> Void) {
+        let suiteName = "hm-console-list-workspaces-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        return (defaults, { defaults.removePersistentDomain(forName: suiteName) })
+    }
+
+    private func consoleAgent(
+        host: Host, paneID: String, workspaceID: String, label: String? = nil,
+        status: AgentStatus = .idle, title: String = "Task"
+    ) -> ConsoleAgent {
+        ConsoleAgent(
+            hostID: host.id,
+            hostName: host.displayName,
+            agent: Agent(
+                .fixture(paneID: paneID, status: status, workspaceID: workspaceID, title: title)),
+            workspaceLabel: label,
+            repositoryCheckout: nil)
+    }
+
+    @Test func sectionsFollowHerdrWorkspaceOrderAndKeepConsoleAgentOrder() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        let host = Host.fixture(name: "devbox")
+        let store = ConsoleListPresentationStore(defaults: defaults)
+        let a = consoleAgent(host: host, paneID: "a", workspaceID: "w2")
+        let b = consoleAgent(host: host, paneID: "b", workspaceID: "w1")
+        let c = consoleAgent(host: host, paneID: "c", workspaceID: "w2")
+
+        let sections = store.workspaceSections(
+            hosts: [host],
+            agents: [a, b, c],
+            workspacesByHost: [
+                host.id: [
+                    ConsoleWorkspace(id: "w3", label: "docs", order: 2),
+                    ConsoleWorkspace(id: "w1", label: "api", order: 0),
+                    ConsoleWorkspace(id: "w2", label: "web", order: 1),
+                ]
+            ])
+
+        #expect(sections.map(\.title) == ["api", "web", "docs"])
+        #expect(sections.map { $0.agents.map(\.agent.paneID) } == [["b"], ["a", "c"], []])
+        #expect(sections.allSatisfy { $0.hostID == host.id && $0.hostName == "devbox" })
+    }
+
+    @Test func agentOutrunningItsWorkspaceStaysListedUnderItsOwnWorkspace() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        let host = Host.fixture(name: "devbox")
+        let store = ConsoleListPresentationStore(defaults: defaults)
+        let known = consoleAgent(host: host, paneID: "a", workspaceID: "w1")
+        let labelled = consoleAgent(host: host, paneID: "b", workspaceID: "w9", label: "late")
+        let unlabelled = consoleAgent(host: host, paneID: "c", workspaceID: "w7", label: "  ")
+
+        let sections = store.workspaceSections(
+            hosts: [host],
+            agents: [unlabelled, labelled, known],
+            workspacesByHost: [host.id: [ConsoleWorkspace(id: "w1", label: " ", order: 0)]])
+
+        #expect(sections.map(\.title) == ["Workspace w1", "Workspace w7", "late"])
+        #expect(sections.map { $0.agents.map(\.agent.paneID) } == [["a"], ["c"], ["b"]])
+    }
+
+    @Test func hostFilterAndSearchNarrowWorkspacesAsTheTerminalsListDoes() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        let first = Host.fixture(name: "zeta")
+        let second = Host.fixture(name: "alpha")
+        let store = ConsoleListPresentationStore(defaults: defaults)
+        let match = consoleAgent(host: first, paneID: "a", workspaceID: "w1", title: "deploy fix")
+        let other = consoleAgent(host: first, paneID: "b", workspaceID: "w1", title: "refactor")
+        let elsewhere = consoleAgent(host: second, paneID: "c", workspaceID: "w1")
+        let workspaces: [Host.ID: [ConsoleWorkspace]] = [
+            first.id: [
+                ConsoleWorkspace(id: "w1", label: "api", order: 0),
+                ConsoleWorkspace(id: "w2", label: "idle", order: 1),
+            ],
+            second.id: [ConsoleWorkspace(id: "w1", label: "web", order: 0)],
+        ]
+        let agents = [match, other, elsewhere]
+
+        let all = store.workspaceSections(
+            hosts: [first, second], agents: agents, workspacesByHost: workspaces)
+        #expect(all.map(\.title) == ["api", "idle", "web"])
+
+        let filtered = store.workspaceSections(
+            hosts: [first, second], agents: agents, workspacesByHost: workspaces,
+            filteredHostID: second.id)
+        #expect(filtered.map(\.title) == ["web"])
+
+        // A query keeps matching Agents only and drops Workspaces left empty.
+        let searched = store.workspaceSections(
+            hosts: [first, second], agents: agents, workspacesByHost: workspaces,
+            searchQuery: " deploy ")
+        #expect(searched.map(\.title) == ["api"])
+        #expect(searched.first?.agents.map(\.agent.paneID) == ["a"])
+    }
+
+    @Test func collapsedWorkspacesPersistPerHostAndASearchOpensThem() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        let first = Host.fixture(name: "zeta")
+        let second = Host.fixture(name: "alpha")
+        // A slash in an opaque Workspace id must survive the round trip.
+        let collapsed = ConsoleWorkspaceSection.ID(hostID: first.id, workspaceID: "w/1")
+        let agents = [
+            consoleAgent(host: first, paneID: "a", workspaceID: "w/1"),
+            consoleAgent(host: second, paneID: "b", workspaceID: "w/1"),
+        ]
+
+        ConsoleListPresentationStore(defaults: defaults).toggleCollapsed(collapsed)
+        let reloaded = ConsoleListPresentationStore(defaults: defaults)
+        let sections = reloaded.workspaceSections(
+            hosts: [first, second], agents: agents, workspacesByHost: [:])
+        #expect(sections.map(\.isCollapsed) == [true, false])
+
+        let searched = reloaded.workspaceSections(
+            hosts: [first, second], agents: agents, workspacesByHost: [:], searchQuery: "Task")
+        #expect(searched.map(\.isCollapsed) == [false, false])
+
+        reloaded.toggleCollapsed(collapsed)
+        let reopened = ConsoleListPresentationStore(defaults: defaults).workspaceSections(
+            hosts: [first, second], agents: agents, workspacesByHost: [:])
+        #expect(reopened.map(\.isCollapsed) == [false, false])
+    }
+
+    @Test func byWorkspacePersistsAndListsHostProblemsAboveItsSections() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        ConsoleListPresentationStore(defaults: defaults).select(.byWorkspace)
+        #expect(ConsoleListPresentationStore(defaults: defaults).mode == .byWorkspace)
+        #expect(ConsoleListPresentationMode.byWorkspace.title == "By Workspace")
+        // No Host headers carry their problems, so they lead the list.
+        #expect(ConsoleHostIssuePlacement(mode: .byWorkspace) == .flatIssueRows)
+    }
+
+    @Test func byWorkspaceSurfaceShowsSectionsEvenWithoutAgents() {
+        func surface(
+            sections: Int, issues: Int = 0, host: String? = nil, query: String = ""
+        ) -> ConsoleAgentsSurface {
+            ConsoleAgentsSurface(
+                hostCount: 1, filteredHostName: host, filteredAgentCount: 0,
+                visibleIssueCount: issues, presentationMode: .byWorkspace,
+                projectedSectionCount: sections, searchQuery: query)
+        }
+        // An empty Workspace still offers New Agent.
+        #expect(surface(sections: 1) == .rows)
+        #expect(surface(sections: 0, issues: 1) == .rows)
+        #expect(surface(sections: 0) == .noAgents)
+        #expect(surface(sections: 0, host: "devbox") == .noAgentsOnHost("devbox"))
+        #expect(surface(sections: 0, query: "x") == .noSearchResults)
+    }
+
+    @Test func aTranscriptMatchKeepsItsAgentInEveryPresentation() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        let host = Host.fixture(name: "devbox")
+        let store = ConsoleListPresentationStore(defaults: defaults)
+        let byName = consoleAgent(host: host, paneID: "a", workspaceID: "w1", title: "relay fix")
+        let byTranscript = consoleAgent(host: host, paneID: "b", workspaceID: "w2")
+        let neither = consoleAgent(host: host, paneID: "c", workspaceID: "w2")
+        let agents = [byName, byTranscript, neither]
+        let transcriptMatches: Set<ConsoleAgent.ID> = [byTranscript.id]
+
+        #expect(
+            agents.filter { $0.matchesListSearch("relay", transcriptMatches: transcriptMatches) }
+                .map(\.agent.paneID) == ["a", "b"])
+        let hostSections = store.sections(
+            hosts: [host], agents: agents, searchQuery: "relay",
+            transcriptMatches: transcriptMatches)
+        #expect(hostSections.first?.agents.map(\.agent.paneID) == ["a", "b"])
+        let workspaceSections = store.workspaceSections(
+            hosts: [host], agents: agents, workspacesByHost: [:], searchQuery: "relay",
+            transcriptMatches: transcriptMatches)
+        #expect(workspaceSections.map { $0.agents.map(\.agent.paneID) } == [["a"], ["b"]])
+    }
+
+    @Test(arguments: ConsoleListPresentationMode.allCases)
+    func pendingTranscriptsReplaceNoResultsWithSearching(mode: ConsoleListPresentationMode) {
+        func surface(awaiting: Bool) -> ConsoleAgentsSurface {
+            ConsoleAgentsSurface(
+                hostCount: 1, filteredHostName: nil, filteredAgentCount: 0,
+                visibleIssueCount: 0, presentationMode: mode, projectedSectionCount: 0,
+                searchQuery: "relay", isAwaitingTranscripts: awaiting)
+        }
+        #expect(surface(awaiting: true) == .searchingTranscripts)
+        #expect(surface(awaiting: false) == .noSearchResults)
+    }
+
+    @Test func aWorkspaceSectionRowShowsTheAgentsNameAndPathOnly() {
+        let host = Host.fixture(name: "Mac")
+        let agent = ConsoleAgent(
+            hostID: host.id,
+            hostName: host.displayName,
+            agent: Agent(
+                .fixture(
+                    paneID: "a", workspaceID: "w1", title: "Fix parser",
+                    name: "all-257-parser-fix")),
+            workspaceLabel: "allied",
+            repositoryCheckout: nil,
+            tabLabel: "parser")
+
+        // The section header already names the Workspace and its Host.
+        let card = AgentCardPresentation(agent: agent, layout: .workspaceSection)
+        #expect(card.headline == "all-257-parser-fix")
+        #expect(card.additionalRows == ["/work/w1"])
+    }
+}

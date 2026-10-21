@@ -184,6 +184,13 @@ struct ConsoleAgent: Identifiable, Sendable, Equatable {
         }
     }
 
+    /// The Agents list's search: the row's own fields, or a transcript the
+    /// Agent search found the query in (`transcriptMatches`, for the
+    /// current query only).
+    func matchesListSearch(_ query: String, transcriptMatches: Set<ID>) -> Bool {
+        transcriptMatches.contains(id) || matchesAgentSearch(query)
+    }
+
     /// The launch directory as a Console row should print it. The snapshot
     /// carries the expanded remote path but not `$HOME`, so only the
     /// account's conventional macOS/Linux homes are shortened to `~`; every
