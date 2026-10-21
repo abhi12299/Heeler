@@ -63,6 +63,7 @@ struct StartAgentStoreTests {
         customAgents: @escaping () -> [CustomAgent] = { [] },
         awaitAgentVisible: @escaping (ConsoleAgent.ID) async -> Void = { _ in },
         origin: StartAgentStore.LaunchOrigin? = nil,
+        preset: StartAgentStore.LaunchPreset? = nil,
         recents: RecentWorkspaceStore? = nil,
         recorder: StartRecorder
     ) -> StartAgentStore {
@@ -77,7 +78,37 @@ struct StartAgentStoreTests {
             },
             awaitAgentVisible: awaitAgentVisible,
             origin: origin,
+            preset: preset,
             recents: recents ?? makeRecents())
+    }
+
+    @Test func workspacePresetPrefillsHostAndWorkspaceButStaysEditable() async {
+        let other = Host.fixture()
+        let host = Host.fixture(address: "b.example")
+        let recents = makeRecents()
+        recents.remember("w1", for: host.id)
+        let recorder = StartRecorder()
+        let store = makeStore(
+            hosts: [other, host],
+            workspaces: { _ in
+                [ConsoleWorkspace(id: "w1", label: "api"), ConsoleWorkspace(id: "w2", label: "web")]
+            },
+            preset: .init(hostID: host.id, workspaceID: "w2"),
+            recents: recents,
+            recorder: recorder)
+
+        #expect(store.selectedHostID == host.id)
+        // The Workspace the user started from beats the remembered one.
+        #expect(store.selectedWorkspaceID == "w2")
+        #expect(store.launchTarget == .existingWorkspace)
+        // Unlike an origin launch, every field stays open to change.
+        #expect(store.offersNewWorkspace && store.offersWorktree)
+
+        await store.discoverAgents()
+        await store.submit()
+        #expect(recorder.hostIDs == [host.id])
+        #expect(recorder.destinations == [.existingWorkspace])
+        #expect(recorder.params.first?.workspaceID == "w2")
     }
 
     /// The `.started` state a default-recorder submit lands in: the recorder's

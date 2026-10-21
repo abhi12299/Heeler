@@ -192,12 +192,16 @@ struct ConsoleHostIssueSummary: Equatable {
 ///
 /// Grouped presentation always takes `.rows` when any Host section is
 /// projected: empty and disconnected Hosts remain visible as sections rather
-/// than collapsing into the flat-list empty claim.
+/// than collapsing into the flat-list empty claim. By Workspace takes `.rows`
+/// for any Workspace section, even one without Agents, since each offers New
+/// Agent; `projectedSectionCount` then counts Workspace sections.
 enum ConsoleAgentsSurface: Equatable {
     case noHosts
     case noAgents
     case noAgentsOnHost(String)
     case noSearchResults
+    /// Nothing matches yet, but the query's transcripts are still out.
+    case searchingTranscripts
     case rows
 
     init(
@@ -207,7 +211,8 @@ enum ConsoleAgentsSurface: Equatable {
         visibleIssueCount: Int,
         presentationMode: ConsoleListPresentationMode = .flat,
         projectedSectionCount: Int = 0,
-        searchQuery: String = ""
+        searchQuery: String = "",
+        isAwaitingTranscripts: Bool = false
     ) {
         let isSearching = !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if hostCount == 0 {
@@ -216,13 +221,15 @@ enum ConsoleAgentsSurface: Equatable {
             if projectedSectionCount > 0 {
                 self = .rows
             } else if isSearching {
-                self = .noSearchResults
+                self = isAwaitingTranscripts ? .searchingTranscripts : .noSearchResults
             } else {
                 self = .noHosts
             }
+        } else if presentationMode == .byWorkspace && projectedSectionCount > 0 {
+            self = .rows
         } else if filteredAgentCount == 0 && visibleIssueCount == 0 {
             if isSearching {
-                self = .noSearchResults
+                self = isAwaitingTranscripts ? .searchingTranscripts : .noSearchResults
             } else if let filteredHostName {
                 self = .noAgentsOnHost(filteredHostName)
             } else {
@@ -240,14 +247,15 @@ enum ConsoleAgentsSurface: Equatable {
 /// header's badge and, while expanded, a row, rather than listing them again
 /// at the top.
 enum ConsoleHostIssuePlacement: Equatable {
-    /// Flat list: global Host-issue rows above the Agent cards.
+    /// Flat and By Workspace lists: global Host-issue rows above the Agent
+    /// cards, since neither has Host headers to carry them.
     case flatIssueRows
     /// Grouped list: Host readiness lives in each Host's own section.
     case sectionHeaders
 
     init(mode: ConsoleListPresentationMode) {
         switch mode {
-        case .flat: self = .flatIssueRows
+        case .flat, .byWorkspace: self = .flatIssueRows
         case .grouped: self = .sectionHeaders
         }
     }

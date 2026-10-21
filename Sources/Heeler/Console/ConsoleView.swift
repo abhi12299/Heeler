@@ -76,6 +76,9 @@ struct ConsoleView: View {
     @State private var hostsTabGeneration = 0
     @State private var settingsTabGeneration = 0
     @State private var isStartingAgent = false
+    /// The Host and Workspace a By Workspace New Agent row prefills; nil
+    /// for every other way into the sheet.
+    @State private var newAgentPreset: StartAgentStore.LaunchPreset?
     @State private var connectionDetailRequest: ConnectionDetailRequest?
     /// The flat lists' summary opened: every Host problem in one sheet.
     @State private var isShowingHostIssues = false
@@ -167,10 +170,10 @@ struct ConsoleView: View {
             if listTab == nil { listTab = shownListTab }
         }
         // The detail's actions can present these even while the sidebar is hidden.
-        .sheet(isPresented: $isStartingAgent) {
+        .sheet(isPresented: $isStartingAgent, onDismiss: { newAgentPreset = nil }) {
             ConsoleSheetContent(sheetPresentation) { presentation in
                 // StartAgentView brings its own NavigationStack.
-                StartAgentView(hosts: hosts.hosts, console: console) { id in
+                StartAgentView(hosts: hosts.hosts, console: console, preset: newAgentPreset) { id in
                     // A fresh launch lands in its own terminal, exactly
                     // as tapping the new row would, on the list that has it.
                     if currentTab != .agents { selectedTab.wrappedValue = .agents }
@@ -734,6 +737,12 @@ struct ConsoleView: View {
                     text: $agentSearchText, isPresented: $isAgentSearchPresented,
                     focus: $focusedSearch, tab: .agents,
                     prompt: "Search Agents", showsField: !usesSidebarNavigation))
+                // Transcripts are searched too, once typing has rested; a
+                // newer keystroke cancels the wait.
+                .task(id: agentSearchText) {
+                    console.agentListSearch.query = agentSearchText
+                    await console.agentListSearch.searchAfterTypingSettles()
+                }
         case .terminals:
             if hosts.hosts.isEmpty {
                 noHostsView
@@ -927,9 +936,7 @@ struct ConsoleView: View {
                         : notificationRouter.path.last ?? selectedTerminal.map {
                             ConsoleAgent.ID(hostID: $0.hostID, paneID: $0.paneID)
                         },
-                    agents: listPresentation.mode == .flat
-                        ? filteredAgents.map(\.id)
-                        : hostSections.filter { !$0.isCollapsed }.flatMap { $0.agents.map(\.id) },
+                    agents: visibleAgentIDs,
                     isSearchFocused: focusedSearch != nil,
                     // Tabs are navigation, not cover: only sheets and alerts
                     // are, including the ones Hosts, Settings and the
@@ -1313,12 +1320,33 @@ struct ConsoleView: View {
             }
         case .noSearchResults:
             ContentUnavailableView.search(text: agentSearchText)
+        case .searchingTranscripts:
+            ContentUnavailableView {
+                ProgressView()
+                    .controlSize(.large)
+            } description: {
+                Text("Searching transcripts for “\(agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines))”")
+            }
         case .rows:
             List(selection: selectedItem) {
-                if listPresentation.mode == .flat {
-                    flatAgentListRows
-                } else {
-                    groupedAgentListRows
+                // Rows matched by name are already listed; transcript
+                // matches join them once the Hosts answer.
+                if console.agentListSearch.isAwaitingTranscripts {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Searching transcripts…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .selectionDisabled()
+                    .accessibilityElement(children: .combine)
+                }
+                switch listPresentation.mode {
+                case .flat: flatAgentListRows
+                case .grouped: groupedAgentListRows
+                case .byWorkspace: workspaceAgentListRows
                 }
             }
             .listStyle(.plain)
@@ -1396,14 +1424,90 @@ struct ConsoleView: View {
         }
     }
 
-    private func agentRow(_ agent: ConsoleAgent) -> some View {
+    @ViewBuilder
+    private var workspaceAgentListRows: some View {
+        // No Host headers carry their problems here, so they lead the list
+        // as in the flat one.
+        if !visibleHostIssues.isEmpty {
+            ConsoleHostIssueList(
+                issues: visibleHostIssues, onOpenHost: { openHostIssue($0) },
+                onShowAll: { isShowingHostIssues = true })
+                .modifier(ListRowVerticalInsetsRemoved())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden, edges: .top)
+                .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
+        }
+        ForEach(workspaceSections) { section in
+            Section {
+                if !section.isCollapsed {
+                    ForEach(section.agents) { agent in
+                        agentRow(agent, inWorkspaceSection: true)
+                    }
+                    // Every section ends in New Agent, as a Terminals card
+                    // ends in New Terminal, clear of the header's toggle.
+                    newAgentRow(in: section)
+                }
+            } header: {
+                WorkspaceSectionHeader(
+                    title: section.title,
+                    hostName: section.hostName,
+                    itemCount: section.agents.count,
+                    isCollapsed: section.isCollapsed,
+                    accessibilityValue: section.headerAccessibilityValue,
+                    showsHost: true,
+                    onToggle: { toggleWorkspaceSection(section.id) })
+            }
+        }
+    }
+
+    /// Opens New Agent with this section's Host and Workspace filled in.
+    private func newAgentRow(in section: ConsoleWorkspaceSection) -> some View {
+        Button {
+            newAgentPreset = .init(hostID: section.hostID, workspaceID: section.workspaceID)
+            isStartingAgent = true
+        } label: {
+            // A quiet secondary action: the section's Agents stay the focus.
+            HStack(spacing: 12) {
+                Image(systemName: "plus")
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(width: 30)
+                    .accessibilityHidden(true)
+                Text("New Agent")
+                    .font(.subheadline)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .accessibilityHint("Starts an Agent in \(section.title) on \(section.hostName).")
+        .hoverEffect(.highlight)
+        .selectionDisabled()
+    }
+
+    /// `inWorkspaceSection`: under a By Workspace header, which already
+    /// names the Workspace and Host, so the row shows the name and path only.
+    private func agentRow(_ agent: ConsoleAgent, inWorkspaceSection: Bool = false) -> some View {
         NavigationLink(value: ConsoleSelection.agent(agent.id)) {
-            AgentCardView(
-                agent: agent,
-                layout: console.rowLayout(for: agent.hostID),
-                isPinned: console.pins.isPinned(
-                    hostID: agent.hostID, paneID: agent.agent.paneID),
-                changes: console.rowChanges.store(for: agent))
+            VStack(alignment: .leading, spacing: 4) {
+                AgentCardView(
+                    agent: agent,
+                    layout: inWorkspaceSection
+                        ? .workspaceSection : console.rowLayout(for: agent.hostID),
+                    isPinned: console.pins.isPinned(
+                        hostID: agent.hostID, paneID: agent.agent.paneID),
+                    changes: console.rowChanges.store(for: agent),
+                    showsHostContext: !inWorkspaceSection)
+                // Where the search found this Agent's transcript, as the
+                // Agent search drawer shows it.
+                if let hit = console.agentListSearch.transcriptHits[agent.id] {
+                    Text(hit.snippet)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .accessibilityLabel("Transcript: \(hit.snippet)")
+                }
+            }
             .modifier(ConsoleRowSelectionContent())
         }
         // The list reads what it shows: a row on screen reads its Agent's
@@ -1579,8 +1683,10 @@ struct ConsoleView: View {
             filteredAgentCount: filteredAgents.count,
             visibleIssueCount: visibleHostIssues.count,
             presentationMode: listPresentation.mode,
-            projectedSectionCount: hostSections.count,
-            searchQuery: agentSearchText)
+            projectedSectionCount: listPresentation.mode == .byWorkspace
+                ? workspaceSections.count : hostSections.count,
+            searchQuery: agentSearchText,
+            isAwaitingTranscripts: console.agentListSearch.isAwaitingTranscripts)
     }
 
     private var hostSections: [ConsoleHostSection] {
@@ -1588,7 +1694,37 @@ struct ConsoleView: View {
             hosts: hosts.hosts,
             console: console,
             filteredHostID: hostFilter,
-            searchQuery: agentSearchText)
+            searchQuery: agentSearchText,
+            transcriptMatches: transcriptMatches)
+    }
+
+    private var workspaceSections: [ConsoleWorkspaceSection] {
+        listPresentation.workspaceSections(
+            hosts: hosts.hosts,
+            console: console,
+            filteredHostID: hostFilter,
+            searchQuery: agentSearchText,
+            transcriptMatches: transcriptMatches)
+    }
+
+    /// The Agents the list shows, in its order, for keyboard navigation.
+    private var visibleAgentIDs: [ConsoleAgent.ID] {
+        switch listPresentation.mode {
+        case .flat:
+            filteredAgents.map(\.id)
+        case .grouped:
+            hostSections.filter { !$0.isCollapsed }.flatMap { $0.agents.map(\.id) }
+        case .byWorkspace:
+            workspaceSections.filter { !$0.isCollapsed }.flatMap { $0.agents.map(\.id) }
+        }
+    }
+
+    private func toggleWorkspaceSection(_ id: ConsoleWorkspaceSection.ID) {
+        // As with Hosts, a search opens every Workspace holding a match.
+        guard agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        withAnimation(reduceMotion ? nil : .snappy) { listPresentation.toggleCollapsed(id) }
     }
 
     private var presentationModeBinding: Binding<ConsoleListPresentationMode> {
@@ -1621,7 +1757,16 @@ struct ConsoleView: View {
         }
         let needle = agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return hostFiltered }
-        return hostFiltered.filter { $0.matchesAgentSearch(needle) }
+        let transcriptMatches = transcriptMatches
+        return hostFiltered.filter {
+            $0.matchesListSearch(needle, transcriptMatches: transcriptMatches)
+        }
+    }
+
+    /// Agents whose transcript holds the current search, once its answer
+    /// has landed.
+    private var transcriptMatches: Set<ConsoleAgent.ID> {
+        Set(console.agentListSearch.transcriptHits.keys)
     }
 
     /// Host issues shown in the list: all of them, or the filtered Host's

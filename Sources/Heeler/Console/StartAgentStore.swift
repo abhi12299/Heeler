@@ -43,6 +43,14 @@ final class StartAgentStore {
         let cwd: String
     }
 
+    /// A starting point for a Console-originated launch: the Agents list's
+    /// By Workspace New Agent row prefills its Host and Workspace. Unlike
+    /// `LaunchOrigin` it decides nothing; every field stays open to change.
+    struct LaunchPreset: Equatable, Sendable {
+        let hostID: Host.ID
+        let workspaceID: String
+    }
+
     /// Where a Console-originated launch should create the Agent (#230).
     /// Origin launches skip this choice: they inherit the origin Workspace.
     enum LaunchTarget: Equatable, Hashable {
@@ -257,6 +265,7 @@ final class StartAgentStore {
         start: @escaping (AgentLaunchRequest, LaunchDestination, Host.ID) async throws -> Agent,
         awaitAgentVisible: @escaping (ConsoleAgent.ID) async -> Void,
         origin: LaunchOrigin? = nil,
+        preset: LaunchPreset? = nil,
         recents: RecentWorkspaceStore = RecentWorkspaceStore()
     ) {
         self.hosts = hosts
@@ -269,8 +278,11 @@ final class StartAgentStore {
         self.start = start
         self.awaitAgentVisible = awaitAgentVisible
         self.recents = recents
-        // Pre-select when there is no choice to make.
-        self.selectedHostID = origin?.hostID ?? (hosts.count == 1 ? hosts.first?.id : nil)
+        // Pre-select when there is no choice to make, or the user chose
+        // where to start from.
+        self.selectedHostID =
+            origin?.hostID ?? preset?.hostID ?? (hosts.count == 1 ? hosts.first?.id : nil)
+        self.pickedWorkspaceID = origin == nil ? preset?.workspaceID : nil
     }
 
     /// Whether the fresh-worktree variant is offered. An origin launch is

@@ -11,6 +11,11 @@ import Observation
 @Observable
 final class AgentSearchStore {
     typealias Search = @Sendable (Host.ID, TranscriptSearchRequest) async throws -> [TranscriptSearchHit]
+    typealias Sleep = @Sendable (Duration) async throws -> Void
+
+    /// How long typing rests before the Hosts are asked: each search reads
+    /// every running Agent's transcript over SSH, so not on every keystroke.
+    static let typingSettleDelay: Duration = .seconds(1)
 
     struct Row: Identifiable, Equatable {
         let agent: ConsoleAgent
@@ -35,14 +40,19 @@ final class AgentSearchStore {
 
     @ObservationIgnored private let agents: () -> [ConsoleAgent]
     @ObservationIgnored private let search: Search
+    @ObservationIgnored private let sleep: Sleep
     /// Hits for `hitsQuery` only; a newer query hides them until its own
     /// answer lands.
     private var hits: [SessionKey: TranscriptSearchHit] = [:]
     private var hitsQuery = ""
 
-    init(agents: @escaping () -> [ConsoleAgent], search: @escaping Search) {
+    init(
+        agents: @escaping () -> [ConsoleAgent], search: @escaping Search,
+        sleep: @escaping Sleep = { try await Task.sleep(for: $0) }
+    ) {
         self.agents = agents
         self.search = search
+        self.sleep = sleep
     }
 
     private var needle: String {
@@ -63,8 +73,42 @@ final class AgentSearchStore {
         }
     }
 
+    /// The current query's transcripts are still out: waiting for typing to
+    /// rest, or for the Hosts to answer. A list should not yet claim it has
+    /// found nothing.
+    var isAwaitingTranscripts: Bool {
+        let needle = needle
+        return !needle.isEmpty && hitsQuery != needle
+    }
+
+    /// The transcript hit behind each Agent the current query found in its
+    /// transcript, for a list that keeps its own name matching. Empty until
+    /// the current query's answer lands.
+    var transcriptHits: [ConsoleAgent.ID: TranscriptSearchHit] {
+        let needle = needle
+        guard !needle.isEmpty, hitsQuery == needle else { return [:] }
+        var found: [ConsoleAgent.ID: TranscriptSearchHit] = [:]
+        for agent in agents() {
+            if let key = sessionKey(for: agent), let hit = hits[key] { found[agent.id] = hit }
+        }
+        return found
+    }
+
     private func sessionKey(for agent: ConsoleAgent) -> SessionKey? {
         agent.transcriptSession.map { SessionKey(hostID: agent.hostID, sessionID: $0.id) }
+    }
+
+    /// Searches once typing has rested for `typingSettleDelay`. Run it per
+    /// query change: a newer keystroke cancels the wait, and with it this
+    /// search.
+    func searchAfterTypingSettles() async {
+        do {
+            try await sleep(Self.typingSettleDelay)
+        } catch {
+            return
+        }
+        guard !Task.isCancelled else { return }
+        await search()
     }
 
     /// Asks each Host for the current query. An answer that arrives after the

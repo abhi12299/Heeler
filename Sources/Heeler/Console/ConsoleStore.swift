@@ -99,6 +99,14 @@ final class ConsoleStore {
             guard let self else { return [] }
             return try await self.searchTranscripts(request, on: hostID)
         })
+    /// The Agents list's own transcript search, apart from the drawer's so
+    /// neither query moves the other.
+    @ObservationIgnored private(set) lazy var agentListSearch = AgentSearchStore(
+        agents: { [weak self] in self?.agents ?? [] },
+        search: { [weak self] hostID, request in
+            guard let self else { return [] }
+            return try await self.searchTranscripts(request, on: hostID)
+        })
     @ObservationIgnored private var terminalSnapshotRevisions: [Host.ID: UInt64] = [:]
     @ObservationIgnored private var terminalTransportGenerations: [Host.ID: UInt64] = [:]
 

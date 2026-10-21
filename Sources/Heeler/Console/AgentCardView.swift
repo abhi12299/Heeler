@@ -16,6 +16,9 @@ struct AgentCardView: View {
     var changes: ChangesStore? = nil
     /// Totals shown in place of a read, for the Agent List Fields preview.
     var sampleChanges: ChangesBadge? = nil
+    /// The Host (and kind) at the second line's end; off where a section
+    /// header already names the Host.
+    var showsHostContext = true
 
     private var totalsSource: ChangesRowTotals.Source? {
         if let changes { .store(changes) } else { sampleChanges.map { .sample($0) } }
@@ -56,7 +59,7 @@ struct AgentCardView: View {
                     if index == 0 || isLast {
                         Spacer(minLength: 8)
                     }
-                    if index == 0 {
+                    if index == 0, showsHostContext {
                         hostText.layoutPriority(1)
                     }
                     if isLast, let totalsSource {
@@ -67,7 +70,7 @@ struct AgentCardView: View {
             if additionalRows.isEmpty {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Spacer(minLength: 0)
-                    hostText
+                    if showsHostContext { hostText }
                     if let totalsSource {
                         ChangesRowTotals(source: totalsSource).layoutPriority(1)
                     }

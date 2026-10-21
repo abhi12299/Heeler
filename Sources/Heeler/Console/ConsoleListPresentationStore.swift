@@ -1,12 +1,15 @@
 import Foundation
 import Observation
 
-/// The two Console Agent-list presentations. Flat remains the default so
+/// The Console Agent-list presentations. Flat remains the default so
 /// introducing grouped-list support does not change the existing surface
-/// until the UI explicitly selects it.
+/// until the UI explicitly selects it. By Workspace nests Agents under one
+/// collapsible section per Workspace, as the Terminals tab's By Workspace
+/// does.
 enum ConsoleListPresentationMode: String, CaseIterable, Identifiable, Sendable {
     case flat
     case grouped
+    case byWorkspace
 
     var id: Self { self }
 
@@ -15,6 +18,7 @@ enum ConsoleListPresentationMode: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .flat: "All Agents"
         case .grouped: "By Host"
+        case .byWorkspace: "By Workspace"
         }
     }
 
@@ -24,6 +28,7 @@ enum ConsoleListPresentationMode: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .flat: "list.bullet"
         case .grouped: "list.bullet.indent"
+        case .byWorkspace: "rectangle.3.group"
         }
     }
 }
@@ -42,6 +47,31 @@ struct ConsoleHostSection: Identifiable, Equatable {
     let statusCounts: ConsoleHostAgentStatusCounts
 
     var id: Host.ID { hostID }
+}
+
+/// One Workspace section of the By Workspace presentation: the Workspace's
+/// Agents in the Console's own order. Workspace ids are opaque and scoped to
+/// their Host, so the pair is the section's identity.
+struct ConsoleWorkspaceSection: Identifiable, Equatable {
+    struct ID: Hashable, Sendable {
+        let hostID: Host.ID
+        let workspaceID: String
+    }
+
+    let hostID: Host.ID
+    let hostName: String
+    let workspaceID: String
+    let title: String
+    let agents: [ConsoleAgent]
+    let isCollapsed: Bool
+
+    var id: ID { ID(hostID: hostID, workspaceID: workspaceID) }
+
+    /// What VoiceOver hears for the section's header.
+    var headerAccessibilityValue: String {
+        let count = agents.count == 1 ? "1 agent" : "\(agents.count) agents"
+        return "\(count), \(isCollapsed ? "Collapsed" : "Expanded")"
+    }
 }
 
 /// The Live Activity-eligible Agent statuses shown in a collapsed Host
@@ -80,18 +110,21 @@ struct ConsoleHostAgentStatusCount: Identifiable, Equatable {
     var id: String { status.rawValue }
 }
 
-/// Persists the Console presentation choice and per-Host collapsed state,
-/// and projects grouped sections without taking ownership of Agent sorting.
-/// Collapsed Host ids are deliberately retained when a Host disconnects or
-/// leaves the catalog so a reconnect or later return restores the choice.
+/// Persists the Console presentation choice and per-Host and per-Workspace
+/// collapsed state, and projects grouped sections without taking ownership
+/// of Agent sorting. Collapsed ids are deliberately retained when a Host
+/// disconnects or leaves the catalog so a reconnect or later return restores
+/// the choice.
 @MainActor
 @Observable
 final class ConsoleListPresentationStore {
     private static let modeDefaultsKey = "console-list.presentation-mode"
     private static let collapsedHostsDefaultsKey = "console-list.collapsed-hosts"
+    private static let collapsedWorkspacesDefaultsKey = "console-list.collapsed-workspaces"
 
     private(set) var mode: ConsoleListPresentationMode
     private var collapsedHostIDs: Set<Host.ID>
+    private var collapsedWorkspaceIDs: Set<ConsoleWorkspaceSection.ID>
     // UserDefaults is documented thread-safe; Sendable modulo that promise.
     @ObservationIgnored private nonisolated(unsafe) let defaults: UserDefaults
 
@@ -103,6 +136,9 @@ final class ConsoleListPresentationStore {
         collapsedHostIDs = Set(
             (defaults.stringArray(forKey: Self.collapsedHostsDefaultsKey) ?? [])
                 .compactMap(UUID.init(uuidString:)))
+        collapsedWorkspaceIDs = Set(
+            (defaults.stringArray(forKey: Self.collapsedWorkspacesDefaultsKey) ?? [])
+                .compactMap(Self.workspaceID(from:)))
     }
 
     func select(_ mode: ConsoleListPresentationMode) {
@@ -130,6 +166,13 @@ final class ConsoleListPresentationStore {
         setCollapsed(!isCollapsed(hostID), for: hostID)
     }
 
+    func toggleCollapsed(_ id: ConsoleWorkspaceSection.ID) {
+        if collapsedWorkspaceIDs.remove(id) == nil { collapsedWorkspaceIDs.insert(id) }
+        defaults.set(
+            collapsedWorkspaceIDs.map(Self.key(for:)).sorted(),
+            forKey: Self.collapsedWorkspacesDefaultsKey)
+    }
+
     /// Convenience contract for the Console UI. Reading these observable
     /// inputs on each render makes status, inventory, and membership changes
     /// re-project without a second cache to reconcile.
@@ -137,7 +180,8 @@ final class ConsoleListPresentationStore {
         hosts: [Host],
         console: ConsoleStore,
         filteredHostID: Host.ID? = nil,
-        searchQuery: String = ""
+        searchQuery: String = "",
+        transcriptMatches: Set<ConsoleAgent.ID> = []
     ) -> [ConsoleHostSection] {
         sections(
             hosts: hosts,
@@ -147,7 +191,8 @@ final class ConsoleListPresentationStore {
             hostsAwaitingSnapshot: console.hostsAwaitingSnapshot,
             hostSyncErrors: console.hostSyncErrors,
             filteredHostID: filteredHostID,
-            searchQuery: searchQuery)
+            searchQuery: searchQuery,
+            transcriptMatches: transcriptMatches)
     }
 
     /// Projects one section per catalog Host, in catalog order. `agents` is
@@ -161,10 +206,16 @@ final class ConsoleListPresentationStore {
         hostsAwaitingSnapshot: Set<Host.ID> = [],
         hostSyncErrors: [Host.ID: String] = [:],
         filteredHostID: Host.ID? = nil,
-        searchQuery: String = ""
+        searchQuery: String = "",
+        transcriptMatches: Set<ConsoleAgent.ID> = []
     ) -> [ConsoleHostSection] {
         let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let searchedAgents = trimmedQuery.isEmpty ? agents : agents.filter { $0.matchesAgentSearch(trimmedQuery) }
+        let searchedAgents =
+            trimmedQuery.isEmpty
+            ? agents
+            : agents.filter {
+                $0.matchesListSearch(trimmedQuery, transcriptMatches: transcriptMatches)
+            }
         let agentsByHost = Dictionary(grouping: searchedAgents, by: \.hostID)
         var projectedHostIDs: Set<Host.ID> = []
 
@@ -198,9 +249,90 @@ final class ConsoleListPresentationStore {
         }
     }
 
+    /// Convenience contract for the Console UI, as `sections(hosts:console:)`.
+    func workspaceSections(
+        hosts: [Host],
+        console: ConsoleStore,
+        filteredHostID: Host.ID? = nil,
+        searchQuery: String = "",
+        transcriptMatches: Set<ConsoleAgent.ID> = []
+    ) -> [ConsoleWorkspaceSection] {
+        workspaceSections(
+            hosts: hosts,
+            agents: console.agents,
+            workspacesByHost: console.workspacesByHost,
+            filteredHostID: filteredHostID,
+            searchQuery: searchQuery,
+            transcriptMatches: transcriptMatches)
+    }
+
+    /// Projects one section per Workspace: Host catalog order first, then
+    /// herdr's Workspace order. `agents` is already sorted by ConsoleStore,
+    /// so each section keeps that relative order. As in the Terminals list, a
+    /// query keeps matching Agents only and drops Workspaces left empty;
+    /// without one, a Workspace running no Agents stays listed.
+    func workspaceSections(
+        hosts: [Host],
+        agents: [ConsoleAgent],
+        workspacesByHost: [Host.ID: [ConsoleWorkspace]],
+        filteredHostID: Host.ID? = nil,
+        searchQuery: String = "",
+        transcriptMatches: Set<ConsoleAgent.ID> = []
+    ) -> [ConsoleWorkspaceSection] {
+        let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        var projectedHostIDs: Set<Host.ID> = []
+        let visibleHosts = hosts.filter {
+            (filteredHostID == nil || $0.id == filteredHostID)
+                && projectedHostIDs.insert($0.id).inserted
+        }
+        return visibleHosts.flatMap { host in
+            let hostAgents = agents.filter {
+                $0.hostID == host.id
+                    && (trimmedQuery.isEmpty
+                        || $0.matchesListSearch(trimmedQuery, transcriptMatches: transcriptMatches))
+            }
+            let agentsByWorkspace = Dictionary(grouping: hostAgents, by: \.agent.workspaceID)
+            let known = (workspacesByHost[host.id] ?? []).sorted { $0.order < $1.order }
+            // A pane can outrun its Workspace between snapshots; keep it listed
+            // under its own id rather than dropping a live Agent.
+            var ordered: [(id: String, label: String?)] = known.map { ($0.id, $0.label) }
+            for agent in hostAgents where !ordered.contains(where: { $0.id == agent.agent.workspaceID }) {
+                ordered.append((agent.agent.workspaceID, agent.workspaceLabel))
+            }
+            return ordered.compactMap { id, label -> ConsoleWorkspaceSection? in
+                let sectionAgents = agentsByWorkspace[id] ?? []
+                if !trimmedQuery.isEmpty && sectionAgents.isEmpty { return nil }
+                let title = label?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return ConsoleWorkspaceSection(
+                    hostID: host.id,
+                    hostName: host.displayName,
+                    workspaceID: id,
+                    title: title.flatMap { $0.isEmpty ? nil : $0 } ?? "Workspace \(id)",
+                    agents: sectionAgents,
+                    // A match is never hidden behind a collapsed Workspace.
+                    isCollapsed: trimmedQuery.isEmpty
+                        && collapsedWorkspaceIDs.contains(
+                            ConsoleWorkspaceSection.ID(hostID: host.id, workspaceID: id)))
+            }
+        }
+    }
+
     private func persistCollapsedHostIDs() {
         defaults.set(
             collapsedHostIDs.map(\.uuidString).sorted(),
             forKey: Self.collapsedHostsDefaultsKey)
+    }
+
+    /// Host UUID first: it never contains the separator, so everything after
+    /// the first one is the opaque Workspace id, whatever it contains.
+    private static func key(for id: ConsoleWorkspaceSection.ID) -> String {
+        "\(id.hostID.uuidString)/\(id.workspaceID)"
+    }
+
+    private static func workspaceID(from key: String) -> ConsoleWorkspaceSection.ID? {
+        guard let separator = key.firstIndex(of: "/"),
+            let hostID = UUID(uuidString: String(key[..<separator]))
+        else { return nil }
+        return .init(hostID: hostID, workspaceID: String(key[key.index(after: separator)...]))
     }
 }
