@@ -15,6 +15,42 @@ final actor ScriptedTransport: Transport {
     /// resubscribe-on-membership-change behavior asserts on this.
     private(set) var capturedSubscriptions: [[EventSubscription]] = []
     private(set) var paneReadParams: [PaneReadParams] = []
+    private var chatFiles: ChatHostFiles?
+    private var chatAgent: Agent?
+    private(set) var chatAgentReads: [AgentTarget] = []
+
+    func scriptChat(files: ChatHostFiles, agent: Agent) {
+        chatFiles = files
+        chatAgent = agent
+    }
+
+    func agentInfo(_ target: AgentTarget) async throws -> Agent {
+        chatAgentReads.append(target)
+        guard let chatAgent, chatAgent.paneID == target.target else {
+            throw TransportError.hostFeatureUnavailable(feature: "Chat")
+        }
+        return chatAgent
+    }
+
+    func hostHomeDirectory() async throws -> String {
+        guard let chatFiles else { throw TransportError.hostFeatureUnavailable(feature: "Chat") }
+        return try await chatFiles.home()
+    }
+
+    func fileStatus(atPath path: String) async throws -> RemoteFileStatus? {
+        guard let chatFiles else { throw TransportError.hostFeatureUnavailable(feature: "Chat") }
+        return try await chatFiles.status(path)
+    }
+
+    func listFiles(_ request: RemoteFileListingRequest) async throws -> RemoteFileListing? {
+        guard let chatFiles else { throw TransportError.hostFeatureUnavailable(feature: "Chat") }
+        return try await chatFiles.list(request)
+    }
+
+    func readHostFileRange(_ range: RemoteFileRange) async throws -> RemoteFileSlice {
+        guard let chatFiles else { throw TransportError.hostFeatureUnavailable(feature: "Chat") }
+        return try await chatFiles.read(range)
+    }
     private(set) var agentPromptParams: [AgentPromptParams] = []
     /// Every `agent.start` received, in order; the new-agent flow (#12)
     /// asserts on the params it forwarded.
@@ -113,6 +149,7 @@ final actor ScriptedTransport: Transport {
     private(set) var notificationRegistrationReads = 0
     private var notificationRegistrationReadFailure: NotificationRegistrationError?
     private var notificationRegistrationWriteFailure: NotificationRegistrationError?
+    private var notificationRegistrationWriteFailsAfterLanding = false
     private var notificationRegistrationWriteGate: CancellablePhaseGate?
     private(set) var notificationRegistrationWriteIsBlocked = false
     /// The Host's current `notify.json` bytes; nil scripts "no config yet".
@@ -127,6 +164,11 @@ final actor ScriptedTransport: Transport {
     private(set) var sidebarLayoutReads = 0
     private var nextSidebarLayoutGate: ScriptedTransportCallGate?
     private var sidebarLayoutReadFailure: (any Error)?
+    /// The Host's `plugin.list` answer for the Heeler plugin; nil scripts
+    /// "not installed".
+    private var heelerPlugin: Result<HeelerPluginInstallation?, any Error> = .success(nil)
+    private(set) var heelerPluginReads = 0
+    private var nextHeelerPluginGate: ScriptedTransportCallGate?
     /// Every untracked-directory listing received, in order.
     private(set) var untrackedDirectoryRequests: [UntrackedDirectoryRequest] = []
     /// Consumed one per listing; an unscripted listing reports Changes as
@@ -145,12 +187,17 @@ final actor ScriptedTransport: Transport {
     private var filePatchReadOutcomes: [Result<FilePatch, any Error>] = []
     private var nextFilePatchReadGate: ScriptedTransportCallGate?
 
+    /// The catalog route this fake reports reaching (ADR 0022).
+    nonisolated let routeID: UUID?
+
     init(
         snapshot: SessionSnapshot = .fixture(),
-        serverInfo: ServerInfo = ServerInfo(version: "0.7.5-fake", protocolVersion: 17)
+        serverInfo: ServerInfo = ServerInfo(version: "0.7.5-fake", protocolVersion: 17),
+        routeID: UUID? = nil
     ) {
         self.snapshot = snapshot
         self.serverInfo = serverInfo
+        self.routeID = routeID
     }
 
     // MARK: Scripting
@@ -373,6 +420,15 @@ final actor ScriptedTransport: Transport {
     /// Makes every subsequent registration replace throw `failure`.
     func setNotificationRegistrationWriteFailure(_ failure: NotificationRegistrationError?) {
         notificationRegistrationWriteFailure = failure
+        notificationRegistrationWriteFailsAfterLanding = false
+    }
+
+    /// Makes every subsequent registration replace land on the Host and then
+    /// throw `failure`, like a write whose exit status is lost after the
+    /// atomic rename. Pass nil to restore normal writes.
+    func setNotificationRegistrationWriteFailsAfterLanding(_ failure: NotificationRegistrationError?) {
+        notificationRegistrationWriteFailure = failure
+        notificationRegistrationWriteFailsAfterLanding = failure != nil
     }
 
     func holdNotificationRegistrationWrites(on gate: CancellablePhaseGate) {
@@ -392,6 +448,53 @@ final actor ScriptedTransport: Transport {
     /// Makes every subsequent sidebar layout read throw `failure`.
     func setSidebarLayoutReadFailure(_ failure: (any Error)?) {
         sidebarLayoutReadFailure = failure
+    }
+
+    /// Scripts what every subsequent Heeler plugin read answers.
+    private var agentUsage: Result<AgentUsageReport, any Error> = .failure(AgentUsageError.invalidReport)
+    private(set) var agentUsageReads = 0
+    private(set) var agentUsageClaudeLimits: [Bool] = []
+    private(set) var agentUsageTimeZones: [String] = []
+    private(set) var agentUsagePluginRoots: [String] = []
+    private var nextAgentUsageGate: ScriptedTransportCallGate?
+
+    func gateNextAgentUsageRead(_ gate: ScriptedTransportCallGate) {
+        nextAgentUsageGate = gate
+    }
+
+    func setAgentUsage(_ result: Result<AgentUsageReport, any Error>) {
+        agentUsage = result
+    }
+
+    func readAgentUsage(
+        timeZone: String, claudeLimits: Bool, pluginRoot: String
+    ) async throws -> AgentUsageReport {
+        agentUsageReads += 1
+        agentUsageClaudeLimits.append(claudeLimits)
+        agentUsageTimeZones.append(timeZone)
+        agentUsagePluginRoots.append(pluginRoot)
+        let result = agentUsage
+        let gate = nextAgentUsageGate
+        nextAgentUsageGate = nil
+        if let gate { await gate.waitUntilOpen() }
+        return try result.get()
+    }
+
+    func setHeelerPlugin(_ result: Result<HeelerPluginInstallation?, any Error>) {
+        heelerPlugin = result
+    }
+
+    func gateNextHeelerPluginRead(_ gate: ScriptedTransportCallGate) {
+        nextHeelerPluginGate = gate
+    }
+
+    func readHeelerPlugin() async throws -> HeelerPluginInstallation? {
+        heelerPluginReads += 1
+        let result = heelerPlugin
+        let gate = nextHeelerPluginGate
+        nextHeelerPluginGate = nil
+        if let gate { await gate.waitUntilOpen() }
+        return try result.get()
     }
 
     /// Makes the `ordinal`-th `ping` on this transport throw `failure`. A real
@@ -720,9 +823,14 @@ final actor ScriptedTransport: Transport {
             notificationRegistrationWriteIsBlocked = false
         }
         try Task.checkCancellation()
-        if let failure = notificationRegistrationWriteFailure { throw failure }
+        if let failure = notificationRegistrationWriteFailure,
+            !notificationRegistrationWriteFailsAfterLanding
+        {
+            throw failure
+        }
         notificationRegistration = contents
         replacedNotificationRegistrations.append(contents)
+        if let failure = notificationRegistrationWriteFailure { throw failure }
     }
 
     func readNotificationConfig() async throws -> Data? {

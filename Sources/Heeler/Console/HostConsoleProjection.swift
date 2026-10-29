@@ -21,6 +21,9 @@ final class HostConsoleProjection {
     /// connection, mirrored from `EventsSession.currentLatency` so a
     /// measurement never outlives the connection that proved it.
     private(set) var latency: Duration?
+    /// The catalog route the current connection reached, mirrored from
+    /// `EventsSession.currentRouteID` exactly as `latency` is.
+    private(set) var routeID: UUID?
     private(set) var syncError: String?
     private(set) var transportGeneration: UInt64 = 0
     private(set) var sidebarRevision: UInt64 = 0
@@ -180,6 +183,12 @@ final class HostConsoleProjection {
         await session.retry()
     }
 
+    /// Stops a connection attempt the user no longer wants to wait for;
+    /// the Host then reads Paused until a retry or the next foreground.
+    func cancelConnecting() async {
+        await session.cancelConnecting()
+    }
+
     /// Makes the new activation visible on this projection before the
     /// session hops into teardown, so an in-flight resync cannot observe
     /// `.connected` after `currentTransport` is already gone.
@@ -190,6 +199,7 @@ final class HostConsoleProjection {
     private func beginNewActivation() {
         status = .connecting
         latency = nil
+        routeID = nil
         invalidateSnapshot()
         publish()
     }
@@ -285,6 +295,45 @@ final class HostConsoleProjection {
             try await session.withTransport { transport in
                 try await transport.modelContextWindow(selector: selector)
             }
+        }
+    }
+
+    /// Chat's transcript reads (ADR 0024) and OpenCode store queries (ADR
+    /// 0025), on this connection's session. Their timeouts and refusals are
+    /// Chat's own errors, which never redial.
+    func chatHostFiles() -> ChatHostFiles {
+        let session = session
+        return ChatHostFiles(
+            status: { path in
+                try await session.withTransport { try await $0.fileStatus(atPath: path) }
+            },
+            list: { request in
+                try await session.withTransport { try await $0.listFiles(request) }
+            },
+            read: { range in
+                try await session.withTransport { try await $0.readHostFileRange(range) }
+            },
+            home: {
+                try await session.withTransport { try await $0.hostHomeDirectory() }
+            },
+            queryOpenCode: { query in
+                try await session.withTransport { try await $0.queryOpenCode(query) }
+            })
+    }
+
+    /// One Agent's current record, which Chat re-reads to notice a changed
+    /// session: no event reports one.
+    func agentInfo(paneID: String) async throws -> Agent {
+        try await session.withTransport { transport in
+            try await transport.agentInfo(AgentTarget(target: paneID))
+        }
+    }
+
+    /// The processes in the Agent's foreground job, which say how its
+    /// program was launched.
+    func processInfo(paneID: String) async throws -> PaneProcessInfo {
+        try await session.withTransport { transport in
+            try await transport.paneProcessInfo(paneID: paneID)
         }
     }
 
@@ -595,6 +644,7 @@ final class HostConsoleProjection {
             // a new connection proved before announcing itself is already
             // here when its `.connected` lands.
             latency = session.currentLatency
+            routeID = session.currentRouteID
             switch status {
             case .failed(let failure):
                 standingFailure = failure

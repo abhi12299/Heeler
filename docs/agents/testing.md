@@ -44,11 +44,13 @@ preparation and can miss SwiftUI labels on a clean Simulator (#339).
 | App stores, parsers, SwiftUI hosting | `make test-app TEST_SELECTOR='HeelerTests/<Suite>'` | Selected app behavior on the named candidate and Simulator |
 | Full local app and SSH package suites | `make test` or `make test-ipad` | App tests followed by the separate HeelerSSH test plan |
 | `Packages/HeelerSSH` | `make test-ci-package` | Committed-project package CI lane with disposable SSH fixtures and count gates |
+| `Packages/HeelerOverlay` | `xcodebuild test -scheme HeelerOverlay` in that directory (see its README for the live suites) | Overlay nodes against the heeler-overlay-natives release it pins; not part of `make test` |
 | App transport/fixture integration | `make test-ci-app SIMULATOR_UDID=<UDID>` | Committed-project app CI lane, real-SSH fixture suites, required test counts |
 | Test/tool runners or agent-doc contracts | `make test-tools` | Local tool tests and document checks; no iOS build |
 | CI suite/count/skip guard changes | `make test-ci-guards` | Guard behavior through supplied log fixtures; no native SSH or iOS acceptance |
 | Agent documentation | `make check-agent-docs` | Document pointers and repository navigation invariants |
 | Plugin or relay | `npm test` in its directory | Node behavior; no install step, Node >= 20 |
+| Docs site | `pnpm install --frozen-lockfile` and the other pnpm commands in [its README](../../docs-site/README.md#commands), from `docs-site/` | Markdown pipeline tests, Astro checks, static build, and internal links |
 | Landing | Its `package.json` `check` and `build` scripts | Astro checks and static build |
 
 App `-only-testing:HeelerTests/...` selectors do not select the HeelerSSH package
@@ -89,6 +91,59 @@ gh workflow run ci.yml --ref <candidate-branch> -f diagnostic_target=layout -f d
 
 The committed-project entrypoint is `make test-ci-diagnostics` with `HEELER_CI_DIAGNOSTIC_TARGET` and optional `HEELER_CI_DIAGNOSTIC_ITERATIONS` environment variables. Counts must be integers from 1 through 100. For layout, the runner passes the count as `HEELER_DIFF_LAYOUT_ITERATIONS` and requires eight executed tests plus `[diff-layout-test] completed N iterations`. Every selected test and requested round must pass; a missing or mismatched completion marker or any skip fails the diagnostic command. Fixture and iteration variables follow a replacement Simulator during destination recovery and are cleared from the shell and current Simulator during runner cleanup. `make test-ci-diagnostic-controls` verifies the workflow isolation, source contracts and fake native-boundary execution guards without Xcode; it does not prove native layout behavior. `make test-weak-network-proxy` exercises propagation, bandwidth, bounded buffering and cleanup over real local TCP.
 
+### Navigation surface replacement
+
+A 60-second Shell Terminal return timeout can be a main-thread update loop,
+not a slow Attach shutdown. Compare the timeout's spindump with
+`TerminalAttachTests.anOutgoingSurfaceUpdateCannotReclaimTheReplacementsControls`.
+It keeps the outgoing and replacement surfaces alive together: only creation
+may claim their shared keyboard/scroll controls; a later outgoing update must
+not steal input or invalidate both representables indefinitely.
+
+Run that regression alongside `AgentDetailShellTerminalPushTests` with
+`TEST_FLAGS='-test-iterations 20 -parallel-testing-enabled NO'` on one pinned
+Simulator. Repetitions must all pass, not stop at the first success. Verify
+each test's 20 `Repetition` children with `xcresulttool get test-results tests`;
+the app wrapper's executed-test count counts method identities, not repetitions.
+Record the candidate SHA and toolchain separately from full-lane coverage.
+
+### Keyboard geometry sampling
+
+`AgentDirectInputTests` requires a real software keyboard before measuring the
+Composer/Direct Input handoff. A zero inset with no keyboard-show notification
+is a setup failure, not evidence of a geometry regression. Record that failure
+separately; do not remove the presentation precondition.
+
+The sampling probe must observe the current inset and chrome position for the
+whole settling interval. Time before an inset change, including a gap with no
+samples, does not establish stability afterward. The controlled-timestamp
+regression covers this gap; the hosted handoff test still checks the actual
+geometry, responder ownership, draft, and one-point movement tolerance.
+
+### Backspace hold timing
+
+Measure the first repeated key inside the key-action callback, relative to the
+press, not when the awaiting test task resumes. The callback must still occur
+between 150 and 500 milliseconds. A delayed observer is a separate regression
+case, not permission for late key delivery. Keep the release, cancellation, and
+subsequent-tap assertions so timing fixes cannot hide a stuck repeat timer.
+
+### SSH fixture session setup
+
+Correlate the client's exchange timeout with the same connection in the
+timestamped `sshd-modern.log`. In run
+[39149165119](https://github.com/ZingerLittleBee/Heeler/actions/runs/39149165119),
+public-key authentication completed before an eight-second gap between
+`PAM: establishing credentials` and the user session handling its first
+channel. Only 1.599 seconds remained in the response-exchange phase when the
+ten-second operation expired.
+
+The unprivileged key-only and Pairing fixtures disable PAM account/session
+processing. They still authenticate real keys and enforce the forwarding
+policies; the separate real-password fixture retains PAM. Do not replace this
+isolation with a larger request deadline, a smaller partial-I/O payload, or
+retries. The original 4 MiB request and ten-second exchange bound remain intact.
+
 ## Build outputs and concurrency
 
 `DERIVED_DEVICE` and `DERIVED_SIMULATOR` separate device and Simulator outputs.
@@ -119,6 +174,19 @@ Local real-SSH tests may skip without a configured sshd/key. The CI runner
 provisions disposable sshd instances and pins counts for mandatory suites.
 Read `scripts/run-ci-ios-tests.sh` when changing fixture membership or skip gates;
 do not copy old counts from a research note.
+
+For Simulator or plugin acceptance against a throwaway herdr instead of the
+live server, run isolated herdr sessions, a loopback sshd, the repository
+plugin, and a fake Push Relay that logs to `relay.jsonl`:
+
+```sh
+python3 scripts/isolated-herdr-backend.py start --sessions default,work --plugin --relay
+python3 scripts/isolated-herdr-backend.py stop
+```
+
+Its `--help` covers `status`, `run`, and `authorize`. Isolation relies on the
+app deriving the socket from the remote `$HOME`; the sshd allows streamlocal
+forwarding to any socket the user can open, the live herdr included.
 
 For Changes reads on Linux, with Docker running:
 

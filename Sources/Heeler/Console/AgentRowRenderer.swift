@@ -15,10 +15,14 @@ struct RenderedToken: Equatable, Sendable {
 }
 
 enum AgentRowRenderer {
-    static func render(layout: AgentRowLayout, agent: ConsoleAgent) -> [[RenderedToken]] {
+    /// `hiding` drops fields the surrounding list already shows; a row left
+    /// empty gives way to the next.
+    static func render(
+        layout: AgentRowLayout, agent: ConsoleAgent, hiding: Set<AgentRowToken> = []
+    ) -> [[RenderedToken]] {
         layout.rows(forAgentKind: agent.agent.kind).compactMap { row in
             var rendered: [RenderedToken] = []
-            for configured in row {
+            for configured in row where !hiding.contains(configured.token) {
                 guard let text = value(for: configured.token, agent: agent),
                     !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 else { continue }
@@ -41,7 +45,7 @@ enum AgentRowRenderer {
         case .terminalTitle: row.agent.terminalTitle
         case .terminalTitleStripped: row.agent.terminalTitleStripped
         case .host: nonempty(row.hostName)
-        case .status: nonempty(row.agent.status.rawValue.capitalized)
+        case .status: row.agent.status.displayTitle.flatMap(nonempty)
         case .directory: nonempty(row.displayCwd)
         case .custom(let name): row.agent.tokens[name]
         }

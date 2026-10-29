@@ -1498,10 +1498,14 @@ printf '%s\n' \
     'Fixture body.' \
     > "$fixture_home/.codex/skills/fixture/SKILL.md"
 # The dollar expressions below belong to the generated fixture script.
+# Like herdr 0.9.4's direct attach, the fake attach writes the startup probe
+# before anything it paints; Heeler drops it, so the output still starts with
+# TTY-OK (#451). Octal \044 spells the probe's dollar sign.
 # shellcheck disable=SC2016
 printf '%s\n' \
     '#!/bin/sh' \
     'stty -echo' \
+    'printf "\\033[?1016\\044p\\033[c"' \
     'printf "TTY-OK\\n"' \
     'printf "ARGS:%s\\n" "$*"' \
     'printf "SOCKET:%s\\n" "$HERDR_SOCKET_PATH"' \
@@ -1509,7 +1513,7 @@ printf '%s\n' \
     'while IFS= read -r line; do' \
     '    case "$line" in' \
     '        __exit__) exit 0 ;;' \
-    '        __fail__) exit 23 ;;' \
+    '        __fail__) printf "herdr: fixture attach failed\\n"; exit 23 ;;' \
     '        __end_race__)' \
     '            printf "END-RACE-READY\\n"' \
     '            sleep 1' \
@@ -1523,6 +1527,20 @@ printf '%s\n' \
     'done' \
     > "$fixture_home/.heeler-ci/fake-attach"
 chmod 755 "$fixture_home/.heeler-ci/fake-attach"
+
+# Usage executes the real plugin against scratch Transcripts, never the user's
+# installed programs or their data roots. The test copies this source snapshot
+# into its own disposable directory before asking the app's Transport to read it.
+if [[ "$ci_lane" == app ]]; then
+    usage_node_path="$(command -v node)" || {
+        echo "Node is required for the mandatory Usage worker suite" >&2
+        exit 1
+    }
+    mkdir -p "$fixture_home/.heeler-ci/usage-plugin"
+    cp -R "$repo_root/plugin/src" "$fixture_home/.heeler-ci/usage-plugin/src"
+    cp "$repo_root/plugin/package.json" "$fixture_home/.heeler-ci/usage-plugin/package.json"
+    ln -s "$usage_node_path" "$fixture_home/.heeler-ci/usage-node"
+fi
 
 # The cold-start wake runs `herdr remote-client-bridge` on the Host. The fixture
 # has no herdr server, and a real one must never be reached, so stand in for the
@@ -1603,6 +1621,9 @@ password_config="$fixture_dir/sshd-password.conf"
 # DEBUG1 logs each channel request as sshd handles it, timestamped by the
 # filter in start_unprivileged_sshd. The full logs go to the diagnostics
 # artifact; the console tail is only an excerpt.
+# Key-only fixtures run as the invoking user, not as a system login service.
+# PAM credential/session setup can stall after public-key authentication and
+# consume the first channel's deadline. Only the real-password fixture uses PAM.
 write_common_config() {
     local port=$1
     local host_key=$2
@@ -1618,7 +1639,7 @@ write_common_config() {
         "PubkeyAuthentication yes" \
         "PubkeyAcceptedAlgorithms ssh-ed25519,rsa-sha2-512" \
         "AuthorizedKeysFile $fixture_dir/authorized_keys" \
-        "UsePAM yes" \
+        "UsePAM no" \
         "PermitRootLogin no" \
         "AllowUsers $fixture_username" \
         "StrictModes no" \
@@ -1725,7 +1746,7 @@ write_pairing_config() {
         "KbdInteractiveAuthentication no" \
         "PubkeyAuthentication yes" \
         "AuthorizedKeysFile $pairing_authorized_keys" \
-        "UsePAM yes" \
+        "UsePAM no" \
         "PermitRootLogin no" \
         "AllowUsers $pairing_username" \
         "StrictModes no" \
@@ -2181,19 +2202,19 @@ run_app_fixture_suites() {
     fi
     case "$ci_app_shard" in
         session-weak)
-            run_suite WeakNetworkE2ETests 10 1 0 WeakNetworkE2ETests || return $?
+            run_suite WeakNetworkE2ETests 11 1 0 WeakNetworkE2ETests || return $?
             ;;
         all | transport)
             run_suite HeelerSSHDirectStreamLocalE2ETests 9 1 0 \
                 HeelerSSHDirectStreamLocalE2ETests || return $?
             if [[ "$ci_app_shard" == all ]]; then
-                run_suite SharedFixtureE2ETests 121 7 0 \
+                run_suite SharedFixtureE2ETests 134 7 0 \
                     HeelerSSHPTYE2ETests HeelerSSHJumpHostGateE2ETests \
                     HeelerSSHTransportBehaviorE2ETests ChangesFieldHostE2ETests \
                     ImageStagingE2ETests WeakNetworkE2ETests PairingCeremonyE2ETests || return $?
                 ln -s SharedFixtureE2ETests.log "$fixture_dir/WeakNetworkE2ETests.log"
             else
-                run_suite SharedFixtureE2ETests 111 6 0 \
+                run_suite SharedFixtureE2ETests 123 6 0 \
                     HeelerSSHPTYE2ETests HeelerSSHJumpHostGateE2ETests \
                     HeelerSSHTransportBehaviorE2ETests ChangesFieldHostE2ETests \
                     ImageStagingE2ETests PairingCeremonyE2ETests || return $?
@@ -2386,6 +2407,16 @@ assert_behavior "Events" HeelerSSHTransportBehaviorE2ETests \
 assert_behavior "absolute Unix endpoints without HOME probing" \
     HeelerSSHTransportBehaviorE2ETests \
     '"absolute Unix endpoints preserve shell characters for RPC and Events without probing HOME"'
+assert_behavior "Usage quoting and endpoint runtime" HeelerSSHTransportBehaviorE2ETests \
+    '"Usage quotes its runtime and plugin paths through an endpoint exec"'
+assert_behavior "Usage missing runtime" HeelerSSHTransportBehaviorE2ETests \
+    '"Usage reports a missing or obsolete recorded runtime without a PATH fallback"'
+assert_behavior "Usage response cap and framing" HeelerSSHTransportBehaviorE2ETests \
+    '"Usage rejects over-cap output and malformed responses on a real exec"'
+assert_behavior "Usage detached worker" HeelerSSHTransportBehaviorE2ETests \
+    '"Usage returns from SSH while its real worker keeps scanning"'
+assert_behavior "Usage deadline isolation" HeelerSSHTransportBehaviorE2ETests \
+    '"Usage times out without invalidating the Host connection"'
 assert_behavior "git stdin bytes and fixed command" HeelerSSHTransportBehaviorE2ETests \
     '"git stdin scripts preserve bytes and use only the fixed shell on direct and Jump paths"'
 assert_behavior "git deadline isolation" HeelerSSHTransportBehaviorE2ETests \
@@ -2450,11 +2481,16 @@ assert_behavior "herdr API rejection" HeelerSSHTransportBehaviorE2ETests \
     '"a herdr error envelope surfaces as a typed API rejection"'
 assert_behavior "session API rejection mapping" HeelerSSHTransportBehaviorE2ETests \
     '"the session maps a herdr rejection to apiRejected"'
-# herdr 0.7.5's `agent_pane_busy` window, which 0.8.0 no longer opens: nothing
-# live exercises this any more, so a named assertion is the only thing standing
-# between a refactor and silently dropping a documented server behaviour (#128).
+# herdr still answers `agent_pane_busy` while a startup command holds a fresh
+# pane's foreground, and 0.9.4 on macOS also refuses a launch line longer than
+# the terminal's canonical input limit until the shell's line editor starts.
+# Only the fixture scripts these refusals, so a named assertion for each is the
+# only thing standing between a refactor and silently dropping a documented
+# server behaviour (#128, #453).
 assert_behavior "agent_pane_busy retry" HeelerSSHTransportBehaviorE2ETests \
     '"agent start waits out a fresh pane'"'"'s booting shell"'
+assert_behavior "canonical-mode launch retry" HeelerSSHTransportBehaviorE2ETests \
+    '"agent start waits out a shell that cannot yet take a long launch line"'
 # Each compensation cleans up different Host state; a count alone cannot tell
 # which of them a change removed. New Workspace (#230) also names the
 # create-then-start shape and the ambiguous-failure preserve rule, because
@@ -2573,7 +2609,7 @@ clear_simulator_environment
 
 if grep -q 'Suite "Session driver resource e2e" skipped' "$package_e2e_log" \
     || grep -q 'skipped:' "$package_e2e_log" \
-    || ! grep -q 'Test run with 72 tests in 5 suites passed' "$package_e2e_log" \
+    || ! grep -q 'Test run with 83 tests in 5 suites passed' "$package_e2e_log" \
     || ! grep -q \
         'Test "none authentication declined by OpenSSH leaves the session for key auth" passed' \
         "$package_e2e_log" \
@@ -2585,6 +2621,12 @@ if grep -q 'Suite "Session driver resource e2e" skipped' "$package_e2e_log" \
         "$package_e2e_log" \
     || ! grep -q \
         'Test "exec streams discard stderr without blocking stdout" passed' \
+        "$package_e2e_log" \
+    || ! grep -q \
+        'Test "one-shot exec finishes when its stderr read takes the stdout reply off the socket" passed' \
+        "$package_e2e_log" \
+    || ! grep -q \
+        'Test "exec stream finishes when its stdout read takes the trailing stderr off the socket" passed' \
         "$package_e2e_log" \
     || ! grep -q \
         'Test "exec stream read timeout and cancellation preserve channel reuse" passed' \
@@ -2600,6 +2642,9 @@ if grep -q 'Suite "Session driver resource e2e" skipped' "$package_e2e_log" \
         "$package_e2e_log" \
     || ! grep -q \
         'Test "a key exchange failure is redialled once and then reported" passed' \
+        "$package_e2e_log" \
+    || ! grep -q \
+        'Test "an externally dialled stream carries a full session and is released on close" passed' \
         "$package_e2e_log" \
     || ! grep -q \
         'Test "handshake negotiates post-quantum key exchange" passed' \
@@ -2691,7 +2736,7 @@ if grep -q 'Suite "Session driver resource e2e" skipped' "$package_e2e_log" \
     || ! grep -q \
         'Test "a bridge write to a closed peer reports peerClosed" passed' \
         "$package_e2e_log"; then
-    echo "The mandatory HeelerSSH package suites did not execute all 71 tests" >&2
+    echo "The mandatory HeelerSSH package suites did not execute all 82 tests" >&2
     exit 1
 fi
 exit 0

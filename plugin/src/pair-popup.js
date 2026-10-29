@@ -16,7 +16,7 @@ import os from "node:os";
 import { emitKeypressEvents } from "node:readline";
 import QRCode from "qrcode";
 
-import { candidateAddresses } from "./addresses.js";
+import { candidateAddresses, withConfiguredAddresses } from "./addresses.js";
 import { readHostKeyFingerprint } from "./host-key.js";
 import { encodePairingCode, PAIRING_AUTH_TAILSCALE } from "./envelope.js";
 import { commentOf, removeKeyLine, sweepExpiredBootstrapLines } from "./authorized-keys.js";
@@ -30,6 +30,7 @@ import {
 } from "./pairing-session.js";
 import { readPairingConfig } from "./pairing-config.js";
 import { decidePairingMode, needsTailscaleProbe } from "./pairing-mode.js";
+import { resolveEndpoint } from "./endpoint.js";
 import {
   detectTailscaleSSH,
   mayBeTailscaleAddress,
@@ -151,6 +152,23 @@ function renderChecklist(state, config, warning) {
   if (config.authWarning) {
     lines.push(`${BOLD}${config.authWarning}${RESET}`);
   }
+  if (config.addressesWarning) {
+    lines.push(`${BOLD}${config.addressesWarning}${RESET}`);
+  }
+  if (config.launcherWarning) {
+    lines.push(`${BOLD}${config.launcherWarning}${RESET}`);
+  }
+  const { endpoint, warning: endpointWarning, note } = config.endpoint;
+  if (endpoint) {
+    const generated = endpoint.generated ? " (generated)" : "";
+    lines.push(`${DIM}Endpoint ${endpoint.socketPath} via ${endpoint.herdrPath}${generated}${RESET}`);
+  }
+  if (endpointWarning) {
+    lines.push(`${BOLD}${endpointWarning}${RESET}`);
+  }
+  if (note) {
+    lines.push(`${DIM}${note}${RESET}`);
+  }
   // Follows the selection: checking a tailnet address raises it, unchecking
   // it again takes it away. Tailscale mode is the answer to it, not a case.
   const conflict = tailscaleMode ? null : tailscaleSSHConflict({
@@ -181,6 +199,7 @@ async function renderPairingCode(payload, { copied = false, printedCode = null }
   const hint = copied
     ? `${BOLD}copied${RESET} ${DIM}-- any other key close${RESET}`
     : `${BOLD}Scan with Heeler${RESET} ${DIM}-- c: copy pairing code, any other key close${RESET}`;
+  const endpoint = payload.socketPath ? [`Endpoint ${payload.socketPath}`] : [];
   const details =
     payload.auth === PAIRING_AUTH_TAILSCALE
       ? [
@@ -190,6 +209,7 @@ async function renderPairingCode(payload, { copied = false, printedCode = null }
             ? `Host key ${payload.hostKeyFingerprint}`
             : "Host key: Heeler trusts tailscaled's key on first use",
           `Addresses: ${payload.addresses.join(", ")}`,
+          ...endpoint,
           "The tailnet ACL authorizes the phone; nothing is enrolled on this machine.",
           "If the tailnet policy uses check, Heeler shows a Tailscale login link to approve.",
           "This code contains no secret and does not expire.",
@@ -198,6 +218,7 @@ async function renderPairingCode(payload, { copied = false, printedCode = null }
           `${BOLD}${payload.username}${RESET} on port ${BOLD}${payload.port}${RESET}`,
           `Host key ${payload.hostKeyFingerprint}`,
           `Addresses: ${payload.addresses.join(", ")}`,
+          ...endpoint,
           `Code valid until ${BOLD}${new Date(payload.expiresAt * 1000).toLocaleTimeString()}` +
             `${RESET}, single use`,
         ];
@@ -300,12 +321,14 @@ async function main() {
     ...readPairingConfig(configDir),
     tailscale: TAILSCALE_NOT_SERVING,
     mode: "openssh",
+    endpoint: { endpoint: null, error: null, warning: null, note: null },
   };
   function currentConfig() {
     checklistConfig = {
       ...readPairingConfig(configDir),
       tailscale: checklistConfig.tailscale,
       mode: checklistConfig.mode,
+      endpoint: checklistConfig.endpoint,
     };
     return checklistConfig;
   }
@@ -335,9 +358,12 @@ async function main() {
   checklistConfig.mode = mode;
   const tailscaleMode = mode === "tailscale";
 
+  // Configured addresses are read once: the checklist is built from them.
+  // Tailscale mode offers the tailnet's own addresses only, since tailscaled
+  // answers nowhere else.
   const candidates = tailscaleMode
     ? tailnetCandidates(checklistConfig.tailscale)
-    : candidateAddresses();
+    : withConfiguredAddresses(candidateAddresses(), readPairingConfig(configDir).addresses);
   if (candidates.length === 0) {
     await holdFatal(tailscaleMode ? MISSING_TAILNET_ADDRESS : MISSING_ADDRESS);
     return;
@@ -489,7 +515,18 @@ async function main() {
     if (hostKeyFingerprint) {
       lastPayload.hostKeyFingerprint = hostKeyFingerprint;
     }
+    withEndpoint(lastPayload);
     displayedCode = await renderPairingCode(lastPayload);
+  }
+
+  // A herdr outside ~/.config/herdr names its socket and launcher, which
+  // makes the code a v2 one (README "Pairing Code v2").
+  function withEndpoint(payload) {
+    const { endpoint } = checklistConfig.endpoint;
+    if (endpoint) {
+      payload.socketPath = endpoint.socketPath;
+      payload.herdrPath = endpoint.herdrPath;
+    }
   }
 
   async function startCeremony() {
@@ -514,6 +551,7 @@ async function main() {
       bootstrapSeed: session.seed,
       expiresAt: session.expiresAt,
     };
+    withEndpoint(lastPayload);
     displayedCode = await renderPairingCode(lastPayload);
     enrollWatch = setInterval(() => onEnrollmentPoll(pairingId), ENROLL_POLL_MS);
   }
@@ -572,6 +610,22 @@ async function main() {
     if (checklistConfig.tailscale.enabled) {
       renderChecklist(state, currentConfig());
     }
+  }
+
+  // Also after the first paint: generating and probing the launcher runs
+  // herdr once, bounded by the probe's timeout. pair.json's launcher is
+  // read here only, so changing it takes a new popup.
+  checklistConfig.endpoint = resolveEndpoint({
+    env: process.env,
+    home,
+    launcher: readPairingConfig(configDir).launcher,
+  });
+  if (checklistConfig.endpoint.error) {
+    await holdFatal(checklistConfig.endpoint.error);
+    return;
+  }
+  if (Object.values(checklistConfig.endpoint).some((value) => value !== null)) {
+    renderChecklist(state, currentConfig());
   }
 
   readKeys((key) => {

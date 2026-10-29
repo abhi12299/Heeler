@@ -88,6 +88,30 @@ struct SessionDriverE2ETests {
         try await connection.close(timeout: .seconds(1))
     }
 
+    @Test("an externally dialled stream carries a full session and is released on close")
+    func externalStreamCarriesSession() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let releases = ReleaseCounter()
+        let connection = try await SSHConnection.connect(
+            to: environment.endpoint,
+            timeout: SessionDriverTestEnvironment.setupTimeout,
+            transportLabel: "a test stream"
+        ) { remaining in
+            let descriptor = try await SocketConnector.connect(
+                to: environment.endpoint,
+                until: ContinuousClock.now.advanced(by: remaining))
+            return try SSHExternalStream(descriptor: descriptor) { releases.increment() }
+        }
+
+        try await environment.authenticate(connection)
+        let result = try await connection.execute("printf external", timeout: .seconds(5))
+        #expect(result.stdout == Data("external".utf8))
+        #expect(releases.value == 0)
+
+        try await connection.close(timeout: .seconds(2))
+        #expect(releases.value == 1)
+    }
+
     @Test("bounded response-line exec closes channels on success and failure")
     func boundedResponseLineExec() async throws {
         let environment = try #require(SessionDriverTestEnvironment.current)
@@ -188,6 +212,32 @@ struct SessionDriverE2ETests {
         }
     }
 
+    @Test("one-shot exec finishes when its stderr read takes the stdout reply off the socket")
+    func oneShotExecSurvivesItsOwnStderrDrain() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        do {
+            // Nothing else uses this connection, so no other operation's
+            // receive can wake the exec once it has drained the socket itself.
+            await connection.waitForInboundBeforeNextExchangeStderrReadForTesting()
+            let start = ContinuousClock.now
+            // The early stderr is read first, so the held round is the one
+            // that finds nothing left but the stdout reply.
+            let result = try await connection.execute(
+                "printf early >&2; /bin/sleep 0.3; printf drained; exit 3",
+                timeout: .seconds(5))
+            #expect(ContinuousClock.now - start < .seconds(3))
+            #expect(result.stdout == Data("drained".utf8))
+            #expect(String(decoding: result.stderr, as: UTF8.self).hasSuffix("early"))
+            #expect(result.exitStatus == 3)
+            #expect(result.reachedEOF)
+            try await connection.close(timeout: .seconds(2))
+        } catch {
+            try? await connection.close(timeout: .seconds(2))
+            throw error
+        }
+    }
+
     @Test("exec streams discard stderr without blocking stdout")
     func execStreamDiscardsStderrWithoutBlocking() async throws {
         let environment = try #require(SessionDriverTestEnvironment.current)
@@ -258,6 +308,29 @@ struct SessionDriverE2ETests {
         #expect(reused.stdout == Data("reusable".utf8))
         #expect(await connection.isConnected)
         try await connection.close(timeout: .seconds(2))
+    }
+
+    @Test("exec stream finishes when its stdout read takes the trailing stderr off the socket")
+    func execStreamSurvivesItsOwnStdoutDrain() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        do {
+            let channel = try await connection.openExec(
+                command: "/bin/sleep 0.3; printf trailing >&2; exit 4",
+                timeout: .seconds(5))
+            // Nothing else uses this connection, so no other operation's
+            // receive can wake the read once it has drained the socket itself.
+            await connection.waitForInboundBeforeNextExecStdoutReadForTesting()
+            let start = ContinuousClock.now
+            #expect(try await channel.read(timeout: .seconds(5)) == nil)
+            #expect(ContinuousClock.now - start < .seconds(3))
+            #expect(try await channel.exitStatus(timeout: .seconds(5)) == 4)
+            try await channel.close(timeout: .seconds(5))
+            try await connection.close(timeout: .seconds(2))
+        } catch {
+            try? await connection.close(timeout: .seconds(2))
+            throw error
+        }
     }
 
     @Test("exec stream read timeout and cancellation preserve channel reuse")
@@ -1261,6 +1334,76 @@ struct SessionDriverE2ETests {
             at: path, offset: 0, maxBytes: 0, timeout: .seconds(5))
         #expect(nothing.data.isEmpty)
         #expect(nothing.length == UInt64(contents.count + 9))
+
+        try await sftp.close(timeout: .seconds(5))
+        _ = try await connection.execute("rm -rf -- '\(root)'", timeout: .seconds(5))
+        try await connection.close(timeout: .seconds(2))
+    }
+
+    @Test("SFTP stats and filtered listings report kinds, sizes and times")
+    func sftpStatsAndFilteredListings() async throws {
+        let environment = try #require(SessionDriverTestEnvironment.current)
+        let connection = try await environment.connect()
+        let rootResult = try await connection.execute(
+            "mktemp -d /tmp/heeler-sftp-entries.XXXXXXXX",
+            timeout: .seconds(5))
+        let root = String(decoding: rootResult.stdout, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // A name longer than the 512-byte buffers the directories-only
+        // listing uses for its long entry, plus a symlink to a rollout.
+        let longName = "rollout-" + String(repeating: "x", count: 230) + "-0199.jsonl"
+        _ = try await connection.execute(
+            "cd '\(root)' && printf 'abc' > rollout-a-0199.jsonl && touch -t 202610060930.00 rollout-a-0199.jsonl"
+                + " && : > '\(longName)' && ln -s rollout-a-0199.jsonl rollout-b-0199.jsonl"
+                + " && : > other.txt && mkdir sub",
+            timeout: .seconds(5))
+
+        let sftp = try await connection.openSFTP(timeout: .seconds(5))
+        #expect(try await sftp.fileStatus(at: "\(root)/missing.jsonl", timeout: .seconds(5)) == nil)
+        #expect(try await sftp.fileStatus(at: "\(root)/no/such/dir", timeout: .seconds(5)) == nil)
+
+        let file = try #require(
+            try await sftp.fileStatus(at: "\(root)/rollout-a-0199.jsonl", timeout: .seconds(5)))
+        #expect(file.kind == .regular)
+        #expect(file.size == 3)
+        let touched = try #require(file.modificationTime)
+        // 2026-10-06 09:30 in the Host's local zone: within a day of UTC.
+        #expect(abs(Int64(touched) - 1_791_279_000) <= 86_400)
+
+        let followed = try #require(
+            try await sftp.fileStatus(at: "\(root)/rollout-b-0199.jsonl", timeout: .seconds(5)))
+        #expect(followed.kind == .regular)
+        #expect(followed.size == 3)
+        let link = try #require(
+            try await sftp.fileStatus(
+                at: "\(root)/rollout-b-0199.jsonl", followSymlinks: false, timeout: .seconds(5)))
+        #expect(link.kind == .symlink)
+        #expect(try await sftp.fileStatus(at: "\(root)/sub", timeout: .seconds(5))?.kind == .directory)
+
+        let listing = try #require(
+            try await sftp.listEntries(
+                at: root,
+                matching: SSHSFTPEntryQuery(
+                    kinds: [.regular, .symlink], nameSuffixes: [".jsonl"], nameContains: "0199"),
+                timeout: .seconds(5)))
+        #expect(listing.entries.map(\.name) == ["rollout-a-0199.jsonl", "rollout-b-0199.jsonl", longName])
+        #expect(listing.entries.map(\.status.kind) == [.regular, .symlink, .regular])
+        #expect(listing.entries.first?.status.size == 3)
+        #expect(!listing.truncated)
+        #expect(!listing.scanIncomplete)
+
+        let capped = try #require(
+            try await sftp.listEntries(
+                at: root, matching: SSHSFTPEntryQuery(maximumEntries: 2), timeout: .seconds(5)))
+        #expect(capped.entries.count == 2)
+        #expect(capped.truncated)
+        let scanned = try #require(
+            try await sftp.listEntries(
+                at: root, matching: SSHSFTPEntryQuery(maximumScanned: 1), timeout: .seconds(5)))
+        #expect(scanned.scanIncomplete)
+        #expect(
+            try await sftp.listEntries(
+                at: "\(root)/missing", matching: SSHSFTPEntryQuery(), timeout: .seconds(5)) == nil)
 
         try await sftp.close(timeout: .seconds(5))
         _ = try await connection.execute("rm -rf -- '\(root)'", timeout: .seconds(5))

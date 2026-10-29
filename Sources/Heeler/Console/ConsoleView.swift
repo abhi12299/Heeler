@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The Console home screen (#8): a bottom tab bar over Agents across every
-/// Host (flat or grouped by Host, #245), their ordinary shell Terminals
+/// Host (flat or grouped by Host or Workspace), their ordinary shell Terminals
 /// grouped by Workspace or Host (#316), and one Search across both. Host
 /// management (#14) and Settings are tabs too. An iPad beside its sidebar
 /// has no tab bar: the sidebar switches lists at its top and opens Hosts
@@ -15,6 +15,7 @@ struct ConsoleView: View {
     let console: ConsoleStore
     let terminal: TerminalSettings
     let inputMode: AgentInputModeSettings
+    let detailSurface: AgentDetailSurfaceSettings
     let appearance: AppAppearanceSettings
     let pushRegistration: PushRegistrationStore
     let notificationPreferences: NotificationPreferencesStore
@@ -47,9 +48,21 @@ struct ConsoleView: View {
     @State private var listTab: ConsoleTab?
     @State private var isHostsTabSelected = false
     @State private var isSettingsTabSelected = false
+    @State private var isUsageTabSelected = false
+    /// The Host the Usage tab reads; nil reads every Host.
+    @State private var usageScopeHostID: Host.ID?
+    @State private var usageMetric = AgentUsageMetric.cost
+    @State private var usageShowsLimits = false
+    /// A Usage Limits widget's tap, until the Usage page shows them.
+    @State private var usageLimitsRequested = false
+    @State private var isShowingUsageListMenu = false
+    @State private var usageListMenuTitleFrame: CGRect?
     /// Hosts and Settings where the sidebar navigates instead of a tab bar.
     @State private var isShowingHostsSheet = false
     @State private var isShowingSettingsSheet = false
+    /// A Host added in Settings waits for that sheet to close before the
+    /// Hosts sheet can present onboarding and its trust alert.
+    @State private var pendingSettingsHostID: Host.ID?
     @State private var isShowingListMenu = false
     /// Where the sidebar's title sits in the window, for its choices to
     /// point at.
@@ -63,6 +76,18 @@ struct ConsoleView: View {
     /// The Agent whose detail shows Changes in place of its terminal; the
     /// window's chrome then follows the app, not the terminal theme.
     @State private var agentShowingChanges: ConsoleAgent.ID?
+    /// The Workspace section about to fold, whose rows the fold takes away
+    /// fade first, and the one that just folded, whose rows it brings in
+    /// slide into place (`ConsoleFoldReveal`).
+    @State private var leavingSection: ConsoleWorkspaceSection.ID?
+    @State private var foldingSection: ConsoleWorkspaceSection.ID?
+    @State private var foldGeneration = 0
+    /// The Agent whose detail shows Chat in place of its terminal, for the
+    /// same reason.
+    @State private var agentShowingChat: ConsoleAgent.ID?
+    /// The Shell Terminal pushed over the Agent on the path, kept here so a
+    /// detail remounted by a size-class change still shows it.
+    @State private var agentShellRoute: AgentShellRoute?
     /// Each list tab's last selection. In regular width both lists sit
     /// beside their own detail, so a list tab comes back to what it showed
     /// rather than to the other list's pick.
@@ -105,7 +130,7 @@ struct ConsoleView: View {
     /// The Agent whose tab the swipe action would close; non-nil shows the
     /// close confirmation.
     @State private var pendingTabClose: ConsoleAgent?
-    /// Owns flat/grouped mode and per-Host collapsed state (#245).
+    /// Owns presentation mode and Host/Workspace collapse state.
     @State private var listPresentation = ConsoleListPresentationStore()
     /// Outlives the detail column's rebuilds, which is the whole point: it
     /// carries the raised keyboard from one Attach screen to the next.
@@ -127,6 +152,7 @@ struct ConsoleView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.sceneWindow) private var sceneWindow
     @State private var detailCrossfade = DetailCrossfade()
+    @State private var tabBarRequest = ConsoleTabBarBridge.Request()
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     /// The window-aware entry into navigation; nil outside a scene root.
@@ -140,12 +166,22 @@ struct ConsoleView: View {
             Tab(value: ConsoleTab.terminals) {
                 // Beside an iPad's sidebar the Terminals list shows in the
                 // Agents tab's split view; see `tabViewSelection`.
-                if !usesSidebarNavigation { splitView(for: .terminals) }
+                if !usesSidebarNavigation {
+                    splitView(for: .terminals)
+                } else {
+                    // Still asking for the bar hidden: a tab's request
+                    // vanishing reads to SwiftUI as asking for the bar, and
+                    // one left by a compact detail would bring it back.
+                    Color.clear.toolbarVisibility(.hidden, for: .tabBar)
+                }
             } label: {
                 // The tab bar fills symbols; filled, this one is a solid
                 // block beside the other tabs' line icons.
                 Label(ConsoleTab.terminals.title, systemImage: "terminal")
                     .environment(\.symbolVariants, .none)
+            }
+            Tab(ConsoleTab.usage.title, systemImage: "chart.bar.xaxis", value: ConsoleTab.usage) {
+                usageTab()
             }
             Tab(ConsoleTab.hosts.title, systemImage: "server.rack", value: ConsoleTab.hosts) {
                 hostList(
@@ -220,7 +256,8 @@ struct ConsoleView: View {
                         host: host,
                         catalog: hosts,
                         sheetPresentation: presentation,
-                        isRetryInFlight: manualReconnectInFlightHostIDs.contains(host.id)
+                        isRetryInFlight: manualReconnectInFlightHostIDs.contains(host.id),
+                        onStop: { Task { await console.cancelHostConnection(host.id) } }
                     ) {
                         // Holds the sheet open through the retry's dial, which a
                         // reconnecting Host makes without a standing failure.
@@ -239,11 +276,21 @@ struct ConsoleView: View {
                     .modifier(ConsoleSheetPresentationModifier(presentation: presentation))
             }
         }
-        .sheet(isPresented: $isShowingSettingsSheet) {
+        .sheet(isPresented: $isShowingSettingsSheet, onDismiss: {
+            guard let id = pendingSettingsHostID else { return }
+            pendingSettingsHostID = nil
+            presentHosts(id)
+        }) {
             ConsoleSheetContent(sheetPresentation) { presentation in
                 settingsView(onDone: { isShowingSettingsSheet = false })
                     .modifier(ConsoleSheetPresentationModifier(presentation: presentation))
             }
+        }
+        // A Usage widget's tap. ContentView routes `heeler://agent` links;
+        // these land on this window's Usage tab.
+        .onOpenURL { url in
+            guard let link = UsageWidgetLink.target(from: url) else { return }
+            openUsage(link)
         }
         // Retries answered, the Host no longer failing, drop what they saw.
         .onChange(of: hostIssuesSheetExplained) { _, explained in
@@ -276,6 +323,7 @@ struct ConsoleView: View {
         }
         .animation(.snappy, value: bannerStore.banner)
         .onChange(of: notificationRouter.path) { old, path in
+            if agentShellRoute?.agentID != path.last { agentShellRoute = nil }
             guard !path.isEmpty else { return }
             bringAgentForward(
                 parking: old.last.map { .agent($0) } ?? selectedTerminal.map { .terminal($0) })
@@ -296,7 +344,7 @@ struct ConsoleView: View {
             guard usesSidebar else { return }
             if isHostsTabSelected {
                 hostsTabRequest = hostsTabRequest.map {
-                    HostsTabRequest(hostID: $0.hostID, origin: nil)
+                    HostsTabRequest(hostID: $0.hostID, showsSetupGuide: $0.showsSetupGuide, origin: nil)
                 }
                 isShowingHostsSheet = true
                 isHostsTabSelected = false
@@ -323,6 +371,7 @@ struct ConsoleView: View {
             get: {
                 if isHostsTabSelected { return .hosts }
                 if isSettingsTabSelected { return .settings }
+                if isUsageTabSelected { return .usage }
                 return shownListTab
             },
             set: { tab in
@@ -332,6 +381,7 @@ struct ConsoleView: View {
                 if tab != currentTab { focusedSearch = nil }
                 isHostsTabSelected = tab == .hosts
                 isSettingsTabSelected = tab == .settings
+                isUsageTabSelected = tab == .usage
                 guard tab.isList else { return }
                 if tab != leavingList, horizontalSizeClass == .regular {
                     swapListSelection(from: leavingList, to: tab)
@@ -372,12 +422,17 @@ struct ConsoleView: View {
         HostListView(
             store: hosts,
             initialHostID: hostsTabRequest?.hostID,
+            usageStore: { console.agentUsageStore(for: $0) },
+            openUsage: { openUsage(for: $0) },
+            showsSetupGuide: hostsTabRequest?.showsSetupGuide ?? false,
             connectionStatuses: console.hostStatuses,
             standingFailures: console.hostStandingFailures,
             latencies: console.hostLatencies,
+            routeIDs: console.hostRouteIDs,
             syncIssues: console.hostSyncErrors,
             manualReconnectInFlightHostIDs: manualReconnectInFlightHostIDs,
             retryConnection: { await reconnectHost($0) },
+            stopConnecting: { await console.cancelHostConnection($0) },
             origin: origin,
             onDone: onDone)
         .id(hostsTabRequest?.id)
@@ -395,7 +450,118 @@ struct ConsoleView: View {
             liveActivities: liveActivities,
             console: console,
             hosts: hosts.hosts,
+            onHostAdded: { id in
+                if isShowingSettingsSheet {
+                    pendingSettingsHostID = id
+                    isShowingSettingsSheet = false
+                } else {
+                    presentHosts(id)
+                }
+            },
             onDone: onDone)
+    }
+
+    /// The lists an iPad sidebar's title menu switches between.
+    private static let sidebarLists: [ConsoleTab] = [.agents, .terminals, .usage]
+
+    /// Every Host the Usage tab can read, in catalog order.
+    private var usageEntries: [AgentUsageHostEntry] {
+        hosts.hosts.map { host in
+            AgentUsageHostEntry(
+                id: host.id, name: host.displayName, store: console.agentUsageStore(for: host.id),
+                isConnected: console.hostStatuses[host.id] == .connected)
+        }
+    }
+
+    /// Usage, as a tab; beside an iPad's sidebar, its own split view whose
+    /// sidebar lists the Hosts and whose title switches back to the lists.
+    @ViewBuilder
+    private func usageTab() -> some View {
+        if usesSidebarNavigation {
+            NavigationSplitView {
+                AgentUsageSidebar(entries: usageEntries, scopeHostID: $usageScopeHostID, metric: usageMetric)
+                    .navigationTitle(ConsoleTab.usage.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            SidebarListMenu(
+                                shown: .usage, lists: Self.sidebarLists,
+                                isPresented: $isShowingUsageListMenu, frame: $usageListMenuTitleFrame)
+                        }
+                        .toolbarItemBackground(.hidden)
+                    }
+                    .toolbar(removing: .title)
+                    .toolbar(removing: .sidebarToggle)
+                    .bottomBar { usageSidebarFooter }
+                    .overlay {
+                        GeometryReader { proxy in
+                            let anchor = SidebarListMenu.anchor(
+                                under: usageListMenuTitleFrame, in: proxy.frame(in: .global))
+                            Color.clear
+                                .frame(width: 1, height: 1)
+                                .popover(isPresented: $isShowingUsageListMenu, arrowEdge: .top) {
+                                    SidebarListChoices(
+                                        shown: .usage, lists: Self.sidebarLists,
+                                        isPresented: $isShowingUsageListMenu,
+                                        select: { selectedTab.wrappedValue = $0 })
+                                }
+                                .position(anchor)
+                        }
+                        .ignoresSafeArea(.container, edges: .top)
+                        .allowsHitTesting(false)
+                    }
+            } detail: {
+                NavigationStack {
+                    AgentUsageDashboard(
+                        entries: usageEntries, scopeHostID: $usageScopeHostID, metric: $usageMetric,
+                        showsLimits: $usageShowsLimits, limitsRequested: $usageLimitsRequested,
+                        allowsColumns: true)
+                        .navigationTitle(
+                            usageScopeHostID.flatMap { id in hosts.hosts.first { $0.id == id }?.displayName }
+                                ?? "All Hosts")
+                        .toolbarTitleDisplayMode(.inlineLarge)
+                }
+            }
+            .background {
+                ConsoleTabBarBridge(chromeScheme: nil, hidesBar: true, request: tabBarRequest)
+            }
+            .toolbarVisibility(.hidden, for: .tabBar)
+        } else {
+            AgentUsageTabView(
+                entries: usageEntries, scopeHostID: $usageScopeHostID, metric: $usageMetric,
+                limitsRequested: $usageLimitsRequested)
+        }
+    }
+
+    /// The Usage sidebar's foot: Hosts and Settings, as the lists' foot has.
+    private var usageSidebarFooter: some View {
+        HStack(spacing: 4) {
+            Button(ConsoleTab.hosts.title, systemImage: "server.rack") { showHosts() }
+            Button(ConsoleTab.settings.title, systemImage: "gearshape") { showSettings() }
+            Spacer(minLength: 0)
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(SidebarIconButtonStyle())
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    /// The Host detail's way into Usage: the tab, on that Host.
+    private func openUsage(for hostID: Host.ID) {
+        usageScopeHostID = hostID
+        isShowingHostsSheet = false
+        selectedTab.wrappedValue = .usage
+    }
+
+    /// A Usage widget's tap: the tab on the widget's scope, and for Usage
+    /// Limits, that Host's limits. A Host since removed opens All Hosts.
+    private func openUsage(_ link: UsageWidgetLink.Target) {
+        let hostID = link.hostID.flatMap { id in hosts.hosts.contains { $0.id == id } ? id : nil }
+        usageScopeHostID = hostID
+        isShowingHostsSheet = false
+        isShowingSettingsSheet = false
+        selectedTab.wrappedValue = .usage
+        usageLimitsRequested = link.showsLimits && hostID != nil
     }
 
     private func switchList(to tab: ConsoleTab) {
@@ -464,11 +630,13 @@ struct ConsoleView: View {
         // list tab.
         isHostsTabSelected = false
         isSettingsTabSelected = false
+        isUsageTabSelected = false
         isStartingAgent = false
         isStartingTerminal = false
         connectionDetailRequest = nil
         isShowingHostIssues = false
         isShowingHostsSheet = false
+        pendingSettingsHostID = nil
         isShowingSettingsSheet = false
     }
 
@@ -596,7 +764,11 @@ struct ConsoleView: View {
                     // leading edge itself.
                     .toolbar(removing: usesSidebarNavigation ? .title : nil)
                     .bottomBar {
-                        if usesSidebarNavigation { sidebarFooter(for: tab) }
+                        if usesSidebarNavigation {
+                            sidebarFooter(for: tab)
+                        } else if horizontalSizeClass == .regular {
+                            wideSidebarListMenus(for: tab)
+                        }
                     }
                     // iPadOS 27 draws the system's button on its own glass;
                     // the sidebar has a bare one beside its others, and the
@@ -614,12 +786,12 @@ struct ConsoleView: View {
                             .environment(
                                 \.detailTopChromeInset,
                                 horizontalSizeClass == .regular ? detailTopInset(for: tab) : 0)
+                            .environment(
+                                \.detailBarRow, horizontalSizeClass == .regular ? detailBar : nil)
                             .environment(\.detailSurfaceEdges, detailSurfaceEdges(for: tab))
                             .environment(\.revealDetailSidebar, sidebarReveal(for: tab))
                             .environment(
-                                \.showsDetailBackHeader,
-                                !presentation.usesRegularColumns
-                                    && UIDevice.current.userInterfaceIdiom == .phone)
+                                \.showsDetailBackButton, !presentation.usesRegularColumns)
                             .toolbar {
                                 if usesSidebarNavigation,
                                     splitVisibility(for: tab).isSidebarVisible == false
@@ -675,7 +847,8 @@ struct ConsoleView: View {
         .ignoresSafeArea(.container, edges: horizontalSizeClass == .regular ? .top : [])
         // In every width, so a window turning compact drops the style.
         .background {
-            ConsoleTabBarBridge(chromeScheme: tabBarChromeScheme, hidesBar: hidesTabBar)
+            ConsoleTabBarBridge(
+                chromeScheme: tabBarChromeScheme, hidesBar: hidesTabBar, request: tabBarRequest)
         }
         .toolbarVisibility(hidesTabBar ? .hidden : .automatic, for: .tabBar)
     }
@@ -688,9 +861,11 @@ struct ConsoleView: View {
     private func sidebarLists(showing tab: ConsoleTab) -> some View {
         if usesSidebarNavigation {
             ZStack {
-                ForEach([ConsoleTab.agents, .terminals], id: \.self) { list in
-                    sidebar(for: list)
-                        .modifier(SidebarListShown(isShown: tab == list))
+                ForEach([ConsoleTab.agents, .terminals], id: \.self) { @Sendable list in
+                    MainActorContent {
+                        sidebar(for: list)
+                            .modifier(SidebarListShown(isShown: tab == list))
+                    }
                 }
             }
             // One field for both lists, searching the one on show.
@@ -714,7 +889,7 @@ struct ConsoleView: View {
                         .frame(width: 1, height: 1)
                         .popover(isPresented: $isShowingListMenu, arrowEdge: .top) {
                             SidebarListChoices(
-                                shown: tab, lists: [.agents, .terminals],
+                                shown: tab, lists: Self.sidebarLists,
                                 isPresented: $isShowingListMenu, select: switchList(to:))
                         }
                         .position(anchor)
@@ -763,7 +938,7 @@ struct ConsoleView: View {
                     focus: $focusedSearch, tab: .terminals,
                     prompt: "Search Terminals", showsField: !usesSidebarNavigation))
             }
-        case .hosts, .settings:
+        case .usage, .hosts, .settings:
             // These tabs show their own screens, not a split view.
             EmptyView()
         }
@@ -782,7 +957,7 @@ struct ConsoleView: View {
     private var hostFilterPicker: some View {
         Picker("Host", selection: $hostFilter) {
             Text("All Hosts").tag(Host.ID?.none)
-            ForEach(hosts.hosts) { host in
+            ForEach(hosts.hosts) { @Sendable host in
                 Text(host.displayName).tag(Host.ID?.some(host.id))
             }
         }
@@ -811,7 +986,7 @@ struct ConsoleView: View {
         if tab == .terminals {
             Menu {
                 Picker("Terminal presentation", selection: terminalPresentationBinding) {
-                    ForEach(TerminalListPresentationMode.allCases) { mode in
+                    ForEach(TerminalListPresentationMode.allCases) { @Sendable mode in
                         Label(mode.title, systemImage: mode.systemImage).tag(mode)
                     }
                 }
@@ -824,7 +999,7 @@ struct ConsoleView: View {
         } else {
             Menu {
                 Picker("Presentation", selection: presentationModeBinding) {
-                    ForEach(ConsoleListPresentationMode.allCases) { mode in
+                    ForEach(ConsoleListPresentationMode.allCases) { @Sendable mode in
                         Label(mode.title, systemImage: mode.systemImage).tag(mode)
                     }
                 }
@@ -845,18 +1020,21 @@ struct ConsoleView: View {
         if usesSidebarNavigation {
             ToolbarItem(placement: .topBarLeading) {
                 SidebarListMenu(
-                    shown: tab, lists: [.agents, .terminals],
+                    shown: tab, lists: Self.sidebarLists,
                     isPresented: $isShowingListMenu, frame: $listMenuTitleFrame)
             }
-            .sidebarItemBackground(.hidden)
+            .toolbarItemBackground(.hidden)
         }
-        // A sidebar keeps its list menus at its foot.
-        if !usesSidebarNavigation, filtersByHost, !foldsHostFilter {
+        // A sidebar keeps its list menus at its foot. A wide iPhone's sidebar
+        // does too, on its trailing edge (`wideSidebarListMenus`), so its bar
+        // keeps only the title. Compact width keeps them in the bar.
+        if !usesSidebarNavigation, horizontalSizeClass != .regular,
+           filtersByHost, !foldsHostFilter {
             ToolbarItem(placement: .primaryAction) {
                 hostFilterMenu.hoverEffect(.highlight)
             }
         }
-        if !usesSidebarNavigation, !hosts.hosts.isEmpty {
+        if !usesSidebarNavigation, horizontalSizeClass != .regular, !hosts.hosts.isEmpty {
             ToolbarItem(placement: .primaryAction) {
                 presentationMenu(for: tab).hoverEffect(.highlight)
             }
@@ -878,12 +1056,32 @@ struct ConsoleView: View {
                 }
                 .buttonStyle(SidebarIconButtonStyle())
             }
-            .sidebarItemBackground(.hidden)
-        } else if !hosts.hosts.isEmpty {
+            .toolbarItemBackground(.hidden)
+        } else if horizontalSizeClass != .regular, !hosts.hosts.isEmpty {
             ToolbarItem(placement: .primaryAction) {
                 newItemButton(for: tab).hoverEffect(.highlight)
             }
         }
+    }
+
+    /// A wide iPhone's list menus and new-item button, at the sidebar's foot
+    /// on its trailing edge: out of the title's way, and within reach.
+    private func wideSidebarListMenus(for tab: ConsoleTab) -> some View {
+        HStack(spacing: 4) {
+            Spacer(minLength: 0)
+            if filtersByHost, !foldsHostFilter {
+                hostFilterMenu.roundPointerHighlight()
+            }
+            if !hosts.hosts.isEmpty {
+                presentationMenu(for: tab).roundPointerHighlight()
+                newItemButton(for: tab)
+            }
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(SidebarIconButtonStyle())
+        .menuStyle(.button)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
     }
 
     /// One button for both lists, so a sidebar switching lists keeps its
@@ -1058,6 +1256,18 @@ struct ConsoleView: View {
         return nil
     }
 
+    private func shellRoute(over id: ConsoleAgent.ID) -> Binding<WorkspaceTerminalRoute?> {
+        Binding(
+            get: { agentShellRoute?.agentID == id ? agentShellRoute?.route : nil },
+            set: { route in
+                if let route {
+                    agentShellRoute = AgentShellRoute(agentID: id, route: route)
+                } else if agentShellRoute?.agentID == id {
+                    agentShellRoute = nil
+                }
+            })
+    }
+
     private func selectAgent(_ id: ConsoleAgent.ID) {
         changeSelection {
             showAgentsList(parking: parkedSelection)
@@ -1141,7 +1351,9 @@ struct ConsoleView: View {
             return terminal.themes.selection(for: colorScheme)
                 .chromeColorScheme(for: colorScheme)
         }
-        guard let id = notificationRouter.path.last, agentShowingChanges != id else { return nil }
+        guard let id = notificationRouter.path.last, agentShowingChanges != id,
+            agentShowingChat != id
+        else { return nil }
         let showsTerminalSurface = console.agents.contains(where: { $0.id == id })
         let showsTerminalSyncSurface = !showsTerminalSurface
             && MissingAgentPresentation(agentID: id, console: console, hosts: hosts)
@@ -1160,12 +1372,13 @@ struct ConsoleView: View {
         if let id = notificationRouter.path.last {
             if let receipt = matchingRemovedWorktreeReceipt(for: id) {
                 removedWorktreeSurface(receipt)
-            } else if let agent = console.agents.first(where: { $0.id == id }) {
+            } else if let agent = console.chatDisplayAgents.first(where: { $0.id == id }) {
                 AgentDetailView(
                     agent: agent,
                     console: console,
                     terminal: terminal,
                     inputMode: inputMode,
+                    detailSurface: detailSurface,
                     hosts: hosts.hosts,
                     activity: activity,
                     keyboardHandoff: keyboardHandoff,
@@ -1176,7 +1389,7 @@ struct ConsoleView: View {
                         // terminal on a spurious reappearance.
                         isVisible: { [notificationRouter] in
                             notificationRouter.path.last == id
-                                && console.agents.contains(where: { $0.id == id })
+                                && console.chatDisplayAgents.contains(where: { $0.id == id })
                                 && currentTab == tab
                         },
                         terminalAccess: { [sceneRouting] in
@@ -1191,7 +1404,16 @@ struct ConsoleView: View {
                         } else if agentShowingChanges == id {
                             agentShowingChanges = nil
                         }
-                    }
+                    },
+                    onShowsChat: { shows in
+                        if shows {
+                            agentShowingChat = id
+                        } else if agentShowingChat == id {
+                            agentShowingChat = nil
+                        }
+                    },
+                    repeatLandings: notificationRouter.repeatLandings,
+                    shellRoute: shellRoute(over: id)
                 )
                 // Selecting another Agent must tear down the previous terminal
                 // pipeline; without the explicit identity the detail column
@@ -1349,7 +1571,7 @@ struct ConsoleView: View {
                 case .byWorkspace: workspaceAgentListRows
                 }
             }
-            .listStyle(.plain)
+            .modifier(ConsoleAgentListStyle(showsCards: listPresentation.mode == .byWorkspace))
             .modifier(ConsoleSidebarListTint())
             .searchDrawerStartsTucked()
         }
@@ -1364,11 +1586,13 @@ struct ConsoleView: View {
             Button("Add Host") { presentHosts() }
                 .buttonStyle(.borderedProminent)
                 .hoverEffect(.highlight)
+            Button("Setup Guide") { presentHostSetupGuide() }
+                .hoverEffect(.highlight)
         }
     }
 
     @ViewBuilder
-    private var flatAgentListRows: some View {
+    private var agentHostIssueRows: some View {
         if !visibleHostIssues.isEmpty {
             // On the Agent rows' edges; the list's own separator sets it
             // apart from the first Agent.
@@ -1382,95 +1606,66 @@ struct ConsoleView: View {
                 .listRowSeparator(.hidden, edges: .top)
                 .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
         }
-        ForEach(filteredAgents) { agent in
-            agentRow(agent)
-                // Right under an iPad sidebar's bar, a rule over the
-                // first row would crowd it.
-                .listRowSeparator(
-                    usesSidebarNavigation && visibleHostIssues.isEmpty
-                        && agent.id == filteredAgents.first?.id ? .hidden : .automatic,
-                    edges: .top)
-        }
     }
 
     @ViewBuilder
-    private var groupedAgentListRows: some View {
-        ForEach(hostSections) { section in
-            let opensDetail = connectionDetail(for: section.hostID) != nil
-            Section {
-                if !section.isCollapsed && !opensDetail {
-                    // As in the Terminals tab: an expanded Host with a
-                    // condition says what it is before any Agents it lists.
-                    if let issue = section.statusPresentation {
-                        ConsoleHostIssueRow(issue: issue) { openHostIssue($0) }
-                    }
-                    ForEach(section.agents) { agent in
-                        agentRow(agent)
-                    }
-                }
-            } header: {
-                ConsoleHostSectionHeaderView(
-                    presentation: ConsoleHostSectionHeaderPresentation(
-                        section: section, opensConnectionDetail: opensDetail)
-                ) {
-                    if opensDetail {
-                        openHostIssue(section.hostID)
-                    } else {
-                        toggleHostSection(section.hostID)
-                    }
-                }
-                .textCase(nil)
+    private var flatAgentListRows: some View {
+        agentHostIssueRows
+        let qualifiers = agentTitleQualifiers
+        let saved = console.savedChatEntries
+        ForEach(filteredAgents) { @Sendable agent in
+            MainActorContent {
+                agentRow(agent, qualifier: qualifiers[agent.id], saved: saved[agent.id])
+                    // Right under an iPad sidebar's bar, a rule over the
+                    // first row would crowd it.
+                    .listRowSeparator(
+                        usesSidebarNavigation && visibleHostIssues.isEmpty
+                            && agent.id == filteredAgents.first?.id ? .hidden : .automatic,
+                        edges: .top)
             }
         }
     }
 
     @ViewBuilder
     private var workspaceAgentListRows: some View {
-        // No Host headers carry their problems here, so they lead the list
-        // as in the flat one.
         if !visibleHostIssues.isEmpty {
-            ConsoleHostIssueList(
-                issues: visibleHostIssues, onOpenHost: { openHostIssue($0) },
-                onShowAll: { isShowingHostIssues = true })
-                .modifier(ListRowVerticalInsetsRemoved())
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden, edges: .top)
-                .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
-        }
-        ForEach(workspaceSections) { section in
             Section {
-                if !section.isCollapsed {
-                    ForEach(section.agents) { agent in
-                        agentRow(agent, inWorkspaceSection: true)
+                // Off the cards, on the page: out to the cards' edges, as
+                // in the Terminals list's By Workspace.
+                ConsoleHostIssueList(
+                    issues: visibleHostIssues, onOpenHost: { openHostIssue($0) },
+                    onShowAll: { isShowingHostIssues = true })
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            }
+        }
+        let qualifiers = agentTitleQualifiers
+        let saved = console.savedChatEntries
+        ForEach(workspaceCards) { @Sendable card in
+            MainActorContent {
+                Section {
+                    // Every expanded card ends in New Agent, as a Terminals
+                    // card ends in New Terminal, clear of the header's toggle.
+                    ForEach(card.rowsEndingInNewAgent) { @Sendable placed in
+                        MainActorContent {
+                            workspaceCardRow(placed, in: card, qualifiers: qualifiers, saved: saved)
+                        }
                     }
-                    // Every section ends in New Agent, as a Terminals card
-                    // ends in New Terminal, clear of the header's toggle.
-                    newAgentRow(in: section)
                 }
-            } header: {
-                WorkspaceSectionHeader(
-                    title: section.title,
-                    hostName: section.hostName,
-                    itemCount: section.agents.count,
-                    isCollapsed: section.isCollapsed,
-                    accessibilityValue: section.headerAccessibilityValue,
-                    showsHost: true,
-                    onToggle: { toggleWorkspaceSection(section.id) })
             }
         }
     }
 
-    /// Opens New Agent with this section's Host and Workspace filled in.
+    /// Opens New Agent with this Workspace's Host and Workspace filled in.
     private func newAgentRow(in section: ConsoleWorkspaceSection) -> some View {
         Button {
-            newAgentPreset = .init(hostID: section.hostID, workspaceID: section.workspaceID)
+            newAgentPreset = .init(hostID: section.id.hostID, workspaceID: section.id.workspaceID)
             isStartingAgent = true
         } label: {
-            // A quiet secondary action: the section's Agents stay the focus.
-            HStack(spacing: 12) {
+            // A quiet secondary action: the card's Agents stay the focus.
+            HStack(spacing: ConsoleWorkspaceCardMetrics.iconSpacing) {
                 Image(systemName: "plus")
                     .font(.system(size: 15, weight: .medium))
-                    .frame(width: 30)
                     .accessibilityHidden(true)
                 Text("New Agent")
                     .font(.subheadline)
@@ -1485,30 +1680,275 @@ struct ConsoleView: View {
         .selectionDisabled()
     }
 
-    /// `inWorkspaceSection`: under a By Workspace header, which already
-    /// names the Workspace and Host, so the row shows the name and path only.
-    private func agentRow(_ agent: ConsoleAgent, inWorkspaceSection: Bool = false) -> some View {
-        NavigationLink(value: ConsoleSelection.agent(agent.id)) {
+    /// Where the Agents list's search found this Agent's transcript, as the
+    /// Agent search drawer shows it.
+    @ViewBuilder
+    private func transcriptSnippet(for agent: ConsoleAgent) -> some View {
+        if let hit = console.agentListSearch.transcriptHits[agent.id] {
+            Text(hit.snippet)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .accessibilityLabel("Transcript: \(hit.snippet)")
+        }
+    }
+
+    @ViewBuilder
+    private func workspaceCardRow(
+        _ placed: ConsoleWorkspaceCard.Placed, in card: ConsoleWorkspaceCard,
+        qualifiers: [ConsoleAgent.ID: String], saved: [ConsoleAgent.ID: HostReadiness]
+    ) -> some View {
+        switch placed.row {
+        case .header:
+            let primary = card.primary
+            let title = card.isRepository ? primary.checkout?.repoName ?? primary.title : primary.title
+            ConsoleWorkspaceCardHeader(
+                card: card, title: title,
+                subtitle: [primary.hostName, primary.pathText].compactMap { $0 }.joined(separator: " · "),
+                checkouts: card.isRepository && card.isCollapsed ? checkoutSummaries(card) : [],
+                onToggle: { toggleWorkspaceSection(primary.id) }
+            )
+            .modifier(ConsoleWorkspaceCardRow(placed: placed, indent: .icon, top: 8, bottom: 4))
+            .selectionDisabled()
+        case .summary:
+            ConsoleWorkspaceCardSummary(
+                card: card,
+                checkouts: card.isRepository ? checkoutSummaries(card) : [],
+                onToggle: { toggleWorkspaceSection(card.primary.id) }
+            )
+            .modifier(foldReveal(placed, in: card))
+            .modifier(
+                ConsoleWorkspaceCardRow(
+                    placed: placed, indent: .text, top: 0, bottom: 6, fillsShortestRow: false))
+            .selectionDisabled()
+        case .checkout(let section):
+            ConsoleCheckoutHeader(
+                section: section, title: checkoutTitle(section),
+                onToggle: section.isNested ? { toggleWorkspaceSection(section.id) } : nil
+            )
+            .modifier(foldReveal(placed, in: card))
+            .modifier(ConsoleWorkspaceCardRow(placed: placed, indent: .icon, top: 0, bottom: 0))
+            .selectionDisabled()
+        case .agent(let agent, let section, let standsAlone):
+            agentLink(
+                agent,
+                background: ConsoleWorkspaceCardRow(
+                    placed: placed, indent: standsAlone ? .icon : .text,
+                    top: standsAlone ? (placed.followsHeader ? 0 : 6) : 2, bottom: standsAlone ? 6 : 4,
+                    isSelected: notificationRouter.path.last == agent.id)
+            ) {
+                cardAgentLabel(
+                    agent, of: section, standsAlone: standsAlone, in: card,
+                    qualifier: qualifiers[agent.id], saved: saved[agent.id], readsChanges: true)
+                .modifier(foldReveal(placed, in: card))
+            } preview: {
+                cardAgentLabel(
+                    agent, of: section, standsAlone: standsAlone, in: card,
+                    qualifier: qualifiers[agent.id], saved: saved[agent.id], readsChanges: false)
+            }
+        case .newAgent:
+            newAgentRow(in: card.primary)
+                .modifier(foldReveal(placed, in: card))
+                .modifier(ConsoleWorkspaceCardRow(placed: placed, indent: .icon, top: 6, bottom: 6))
+        }
+    }
+
+    /// An Agent as its card shows it: an Agent that is its checkout's or
+    /// Workspace's only one takes that title and icon; a row leaves to the
+    /// card what the card already says.
+    private func cardAgentLabel(
+        _ agent: ConsoleAgent, of section: ConsoleWorkspaceSection, standsAlone: Bool,
+        in card: ConsoleWorkspaceCard, qualifier: String?, saved: HostReadiness?, readsChanges: Bool
+    ) -> some View {
+        let showsHost = standsAlone && !card.isRepository
+        let heading = standsAlone
+            ? AgentCardHeading(
+                title: card.isRepository ? checkoutTitle(section) : ConsoleCheckoutTitle(title: section.title),
+                isProminent: !card.isRepository)
+            : nil
+        return HStack(alignment: .firstTextBaseline, spacing: ConsoleWorkspaceCardMetrics.iconSpacing) {
+            if standsAlone {
+                ConsoleWorkspaceCardIcon(checkout: section.checkout)
+            }
             VStack(alignment: .leading, spacing: 4) {
                 AgentCardView(
                     agent: agent,
-                    layout: inWorkspaceSection
-                        ? .workspaceSection : console.rowLayout(for: agent.hostID),
+                    layout: console.rowLayout(for: agent.hostID),
+                    isPinned: console.pins.isPinned(
+                        hostID: agent.hostID, paneID: agent.agent.paneID),
+                    changes: readsChanges ? console.rowChanges.store(for: agent) : nil,
+                    qualifier: standsAlone ? nil : qualifier,
+                    saved: saved,
+                    hiddenTokens: ConsoleWorkspaceCard.hiddenTokens(for: agent, showsHost: showsHost),
+                    heading: heading,
+                    showsHost: showsHost)
+                transcriptSnippet(for: agent)
+            }
+        }
+    }
+
+    /// A repository's checkout, titled by the branch its Agents' latest
+    /// Changes reads found.
+    private func checkoutTitle(_ section: ConsoleWorkspaceSection) -> ConsoleCheckoutTitle {
+        let reads = section.agents.compactMap { agent -> CheckoutChanges? in
+            guard case .loaded(let changes) = console.rowChanges.store(for: agent)?.phase else { return nil }
+            return changes
+        }
+        return ConsoleCheckoutTitle(
+            label: section.title,
+            isMainCheckout: section.checkout?.isLinkedWorktree != true,
+            branch: ConsoleCheckoutTitle.branch(at: section.checkout?.checkoutPath, in: reads))
+    }
+
+    private func checkoutSummaries(_ card: ConsoleWorkspaceCard) -> [ConsoleCheckoutSummary] {
+        card.checkouts.map { section in
+            ConsoleCheckoutSummary(
+                id: section.id, title: checkoutTitle(section), checkout: section.checkout,
+                agents: section.agents)
+        }
+    }
+
+    private func toggleWorkspaceSection(_ id: ConsoleWorkspaceSection.ID) {
+        // A search opens every card holding a match, so a toggle then would
+        // change nothing on screen.
+        guard agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !reduceMotion else {
+            listPresentation.toggleWorkspace(id)
+            return
+        }
+        guard leavingSection == nil else { return }
+        // Opening a worktree takes nothing away; every other fold first
+        // fades the rows it takes, which the list would fade only slowly,
+        // under the rows coming in.
+        let opensWorktree = workspaceCards.lazy.flatMap(\.nested).first { $0.id == id }?.isCollapsed == true
+        guard !opensWorktree else {
+            fold(id)
+            return
+        }
+        withAnimation(.easeOut(duration: 0.12)) { leavingSection = id }
+        Task {
+            try? await Task.sleep(for: .milliseconds(120))
+            fold(id)
+        }
+    }
+
+    private func fold(_ id: ConsoleWorkspaceSection.ID) {
+        foldGeneration += 1
+        let generation = foldGeneration
+        // All in the fold's animation: a change outside it, made in the
+        // same update, would take the list's animation away.
+        withAnimation(.snappy) {
+            leavingSection = nil
+            foldingSection = id
+            listPresentation.toggleWorkspace(id)
+        }
+        Task {
+            try? await Task.sleep(for: .milliseconds(800))
+            if foldGeneration == generation { foldingSection = nil }
+        }
+    }
+
+    /// Whether folding `section` brings `placed` in or takes it away: a
+    /// card's rows under its header when the card folds, a worktree's
+    /// Agents when it does.
+    private func fold(
+        _ section: ConsoleWorkspaceSection.ID?, moves placed: ConsoleWorkspaceCard.Placed,
+        in card: ConsoleWorkspaceCard
+    ) -> Bool {
+        guard let section else { return false }
+        return switch placed.row {
+        case .header: false
+        case .summary, .checkout: section == card.id
+        case .agent(_, let agentSection, _): section == card.id || section == agentSection.id
+        case .newAgent: section == card.id
+        }
+    }
+
+    /// How `placed` moves with a fold: out before the fold takes it, or in
+    /// after the rows the fold brings in before it.
+    private func foldReveal(_ placed: ConsoleWorkspaceCard.Placed, in card: ConsoleWorkspaceCard) -> ConsoleFoldReveal {
+        let isLeaving = fold(leavingSection, moves: placed, in: card)
+        guard fold(foldingSection, moves: placed, in: card) else {
+            return ConsoleFoldReveal(isLeaving: isLeaving, isRevealing: false, delay: 0)
+        }
+        let order = card.rows.prefix { $0.id != placed.id }
+            .filter { fold(foldingSection, moves: $0, in: card) }.count
+        return ConsoleFoldReveal(isLeaving: isLeaving, isRevealing: true, delay: Double(order) * 0.04)
+    }
+
+    @ViewBuilder
+    private var groupedAgentListRows: some View {
+        let qualifiers = agentTitleQualifiers
+        let saved = console.savedChatEntries
+        ForEach(hostSections) { @Sendable section in
+            MainActorContent {
+                let opensDetail = connectionDetail(for: section.hostID) != nil
+                Section {
+                    if !section.isCollapsed && !opensDetail {
+                        // As in the Terminals tab: an expanded Host with a
+                        // condition says what it is before any Agents it lists.
+                        if let issue = section.statusPresentation {
+                            ConsoleHostIssueRow(issue: issue) { openHostIssue($0) }
+                        }
+                        ForEach(section.agents) { @Sendable agent in
+                            MainActorContent { agentRow(agent, qualifier: qualifiers[agent.id], saved: saved[agent.id]) }
+                        }
+                    }
+                } header: {
+                    ConsoleHostSectionHeaderView(
+                        presentation: ConsoleHostSectionHeaderPresentation(
+                            section: section, opensConnectionDetail: opensDetail)
+                    ) {
+                        if opensDetail {
+                            openHostIssue(section.hostID)
+                        } else {
+                            toggleHostSection(section.hostID)
+                        }
+                    }
+                    .textCase(nil)
+                }
+            }
+        }
+    }
+
+    private func agentRow(_ agent: ConsoleAgent, qualifier: String?, saved: HostReadiness?) -> some View {
+        agentLink(
+            agent,
+            background: ConsoleRowSelectionBackground(
+                isSelected: notificationRouter.path.last == agent.id)
+        ) {
+            VStack(alignment: .leading, spacing: 4) {
+                AgentCardView(
+                    agent: agent,
+                    layout: console.rowLayout(for: agent.hostID),
                     isPinned: console.pins.isPinned(
                         hostID: agent.hostID, paneID: agent.agent.paneID),
                     changes: console.rowChanges.store(for: agent),
-                    showsHostContext: !inWorkspaceSection)
-                // Where the search found this Agent's transcript, as the
-                // Agent search drawer shows it.
-                if let hit = console.agentListSearch.transcriptHits[agent.id] {
-                    Text(hit.snippet)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .accessibilityLabel("Transcript: \(hit.snippet)")
-                }
+                    qualifier: qualifier,
+                    saved: saved)
+                transcriptSnippet(for: agent)
             }
-            .modifier(ConsoleRowSelectionContent())
+        } preview: {
+            AgentCardView(
+                agent: agent,
+                layout: console.rowLayout(for: agent.hostID),
+                isPinned: console.pins.isPinned(
+                    hostID: agent.hostID, paneID: agent.agent.paneID),
+                qualifier: qualifier,
+                saved: saved)
+        }
+    }
+
+    /// An Agent's row: `label` opens its detail, with the row's pin, close,
+    /// and window actions. `background` draws the row's place in the list;
+    /// `preview` is what a lifted card shows (see `ConsoleRowContextMenu`).
+    private func agentLink<RowContent: View, Background: ViewModifier, Preview: View>(
+        _ agent: ConsoleAgent, background: Background,
+        @ViewBuilder label: () -> RowContent, @ViewBuilder preview: () -> Preview
+    ) -> some View {
+        NavigationLink(value: ConsoleSelection.agent(agent.id)) {
+            label()
+                .modifier(ConsoleRowSelectionContent())
         }
         // The list reads what it shows: a row on screen reads its Agent's
         // Checkout, and an exit from Working while none does waits for one.
@@ -1517,9 +1957,7 @@ struct ConsoleView: View {
         .onChange(of: agent.directory == nil) { _, lacksDirectory in
             if !lacksDirectory { console.rowChanges.agentReportedDirectory(agent) }
         }
-        .modifier(
-            ConsoleRowSelectionBackground(
-                isSelected: notificationRouter.path.last == agent.id))
+        .modifier(background)
         .hoverEffect(.highlight)
         .modifier(
             ConsoleRowContextMenu {
@@ -1548,11 +1986,7 @@ struct ConsoleView: View {
                     pendingTabClose = agent
                 }
             } preview: {
-                AgentCardView(
-                    agent: agent,
-                    layout: console.rowLayout(for: agent.hostID),
-                    isPinned: console.pins.isPinned(
-                        hostID: agent.hostID, paneID: agent.agent.paneID))
+                preview()
             })
         .modifier(
             AgentWindowDrag(
@@ -1683,8 +2117,7 @@ struct ConsoleView: View {
             filteredAgentCount: filteredAgents.count,
             visibleIssueCount: visibleHostIssues.count,
             presentationMode: listPresentation.mode,
-            projectedSectionCount: listPresentation.mode == .byWorkspace
-                ? workspaceSections.count : hostSections.count,
+            projectedSectionCount: hostSections.count,
             searchQuery: agentSearchText,
             isAwaitingTranscripts: console.agentListSearch.isAwaitingTranscripts)
     }
@@ -1698,33 +2131,20 @@ struct ConsoleView: View {
             transcriptMatches: transcriptMatches)
     }
 
-    private var workspaceSections: [ConsoleWorkspaceSection] {
-        listPresentation.workspaceSections(
-            hosts: hosts.hosts,
-            console: console,
-            filteredHostID: hostFilter,
-            searchQuery: agentSearchText,
-            transcriptMatches: transcriptMatches)
+    private var workspaceCards: [ConsoleWorkspaceCard] {
+        ConsoleWorkspaceCard.cards(
+            listPresentation.workspaceSections(
+                hosts: hosts.hosts, console: console,
+                filteredHostID: hostFilter, searchQuery: agentSearchText,
+                transcriptMatches: transcriptMatches))
     }
 
-    /// The Agents the list shows, in its order, for keyboard navigation.
     private var visibleAgentIDs: [ConsoleAgent.ID] {
         switch listPresentation.mode {
-        case .flat:
-            filteredAgents.map(\.id)
-        case .grouped:
-            hostSections.filter { !$0.isCollapsed }.flatMap { $0.agents.map(\.id) }
-        case .byWorkspace:
-            workspaceSections.filter { !$0.isCollapsed }.flatMap { $0.agents.map(\.id) }
+        case .flat: filteredAgents.map(\.id)
+        case .grouped: hostSections.filter { !$0.isCollapsed }.flatMap { $0.agents.map(\.id) }
+        case .byWorkspace: workspaceCards.flatMap(\.visibleAgentIDs)
         }
-    }
-
-    private func toggleWorkspaceSection(_ id: ConsoleWorkspaceSection.ID) {
-        // As with Hosts, a search opens every Workspace holding a match.
-        guard agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return
-        }
-        withAnimation(reduceMotion ? nil : .snappy) { listPresentation.toggleCollapsed(id) }
     }
 
     private var presentationModeBinding: Binding<ConsoleListPresentationMode> {
@@ -1748,13 +2168,13 @@ struct ConsoleView: View {
         }
     }
 
+    private var hostFilteredAgents: [ConsoleAgent] {
+        guard let hostFilter else { return console.chatDisplayAgents }
+        return console.chatDisplayAgents.filter { $0.hostID == hostFilter }
+    }
+
     private var filteredAgents: [ConsoleAgent] {
-        let hostFiltered: [ConsoleAgent]
-        if let hostFilter {
-            hostFiltered = console.agents.filter { $0.hostID == hostFilter }
-        } else {
-            hostFiltered = console.agents
-        }
+        let hostFiltered = hostFilteredAgents
         let needle = agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return hostFiltered }
         let transcriptMatches = transcriptMatches
@@ -1767,6 +2187,21 @@ struct ConsoleView: View {
     /// has landed.
     private var transcriptMatches: Set<ConsoleAgent.ID> {
         Set(console.agentListSearch.transcriptHits.keys)
+    }
+
+    /// Program names for rows whose cards would otherwise read the same.
+    /// Judged before the search, so a row's title does not change as the
+    /// user types.
+    private var agentTitleQualifiers: [ConsoleAgent.ID: String] {
+        // By Workspace rows leave fields to their card's titles.
+        let isByWorkspace = listPresentation.mode == .byWorkspace
+        return AgentTitleQualifier.qualifiers(for: hostFilteredAgents) { agent in
+            let card = AgentCardPresentation(
+                agent: agent, layout: console.rowLayout(for: agent.hostID),
+                hiding: isByWorkspace
+                    ? ConsoleWorkspaceCard.hiddenTokens(for: agent, showsHost: false) : [])
+            return .init(title: card.headline, namesAgent: card.namesAgent(inFirst: card.rows.count))
+        }
     }
 
     /// Host issues shown in the list: all of them, or the filtered Host's
@@ -1792,7 +2227,9 @@ struct ConsoleView: View {
 
     private struct HostsTabRequest {
         let id = UUID()
-        let hostID: Host.ID
+        var hostID: Host.ID?
+        /// Opens the Setup Guide over the Host list.
+        var showsSetupGuide = false
         /// The tab the Host was opened from; its back button returns there.
         /// Nil when opened from the Hosts tab itself.
         let origin: ConsoleTab?
@@ -1836,7 +2273,8 @@ struct ConsoleView: View {
                     host: host,
                     catalog: hosts,
                     sheetPresentation: sheetPresentation,
-                    isRetryInFlight: manualReconnectInFlightHostIDs.contains(id)
+                    isRetryInFlight: manualReconnectInFlightHostIDs.contains(id),
+                    onStop: { Task { await console.cancelHostConnection(id) } }
                 ) {
                     // As in the single Host's sheet: stays through the dial.
                     hostIssuesLastFailures[id] = detail.failure
@@ -1897,6 +2335,13 @@ struct ConsoleView: View {
         showHosts()
     }
 
+    /// Hosts with the Setup Guide over it, so the guide's Scan to Pair and
+    /// Add Manually run where every new Host is added.
+    private func presentHostSetupGuide() {
+        hostsTabRequest = HostsTabRequest(showsSetupGuide: true, origin: nil)
+        showHosts()
+    }
+
     private func reconnectHost(_ id: Host.ID) async {
         guard manualReconnectInFlightHostIDs.insert(id).inserted else { return }
         await console.retryHost(id)
@@ -1905,11 +2350,11 @@ struct ConsoleView: View {
     }
 }
 
-private extension ToolbarContent {
+extension ToolbarContent {
     /// The glass a toolbar item shares with its neighbors; before iOS 26
     /// items draw none.
     @ToolbarContentBuilder
-    func sidebarItemBackground(_ visibility: Visibility) -> some ToolbarContent {
+    func toolbarItemBackground(_ visibility: Visibility) -> some ToolbarContent {
         if #available(iOS 26.0, *) {
             sharedBackgroundVisibility(visibility)
         } else {
@@ -1968,7 +2413,7 @@ private struct SidebarListMenu: View {
         // would be clipped. The width is held outside the button, whose own
         // frame, which its pointer highlight follows, fits the title on show.
         ZStack(alignment: .leading) {
-            ForEach(lists) { SidebarListTitle(title: $0.title).hidden() }
+            ForEach(lists) { @Sendable list in SidebarListTitle(title: list.title).hidden() }
             Button { isPresented = true } label: { SidebarListTitle(title: shown.title) }
                 // A style of its own keeps the label SwiftUI's: bridged to a
                 // bar button, it would show only its image.
@@ -1977,7 +2422,7 @@ private struct SidebarListMenu: View {
                 // gives way to one over the bar item's whole frame.
                 .contentShape(.hoverEffect, Capsule().inset(by: 4))
                 .hoverEffect(.highlight)
-                .accessibilityHint("Switches between Agents and Terminals")
+                .accessibilityHint("Switches between Agents, Terminals and Usage")
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
                     frame = $0
                 }
@@ -1995,29 +2440,31 @@ private struct SidebarListChoices: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(lists) { list in
-                Button {
-                    isPresented = false
-                    select(list)
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "checkmark")
-                            .font(.body.weight(.semibold))
-                            .opacity(list == shown ? 1 : 0)
-                            .accessibilityHidden(true)
-                        Image(systemName: Self.symbol(for: list))
-                            .frame(width: 24)
-                            .accessibilityHidden(true)
-                        Text(list.title)
-                        Spacer(minLength: 0)
+            ForEach(lists) { @Sendable list in
+                MainActorContent {
+                    Button {
+                        isPresented = false
+                        select(list)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "checkmark")
+                                .font(.body.weight(.semibold))
+                                .opacity(list == shown ? 1 : 0)
+                                .accessibilityHidden(true)
+                            Image(systemName: Self.symbol(for: list))
+                                .frame(width: 24)
+                                .accessibilityHidden(true)
+                            Text(list.title)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 44)
+                        .contentShape(.rect)
                     }
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 44)
-                    .contentShape(.rect)
+                    .buttonStyle(.plain)
+                    .hoverEffect(.highlight)
+                    .accessibilityAddTraits(list == shown ? .isSelected : [])
                 }
-                .buttonStyle(.plain)
-                .hoverEffect(.highlight)
-                .accessibilityAddTraits(list == shown ? .isSelected : [])
             }
         }
         .padding(.vertical, 6)
@@ -2026,7 +2473,11 @@ private struct SidebarListChoices: View {
     }
 
     private static func symbol(for list: ConsoleTab) -> String {
-        list == .terminals ? "terminal" : "sparkles"
+        switch list {
+        case .terminals: "terminal"
+        case .usage: "chart.bar.xaxis"
+        default: "sparkles"
+        }
     }
 }
 
@@ -2209,7 +2660,9 @@ struct MissingAgentPresentation: Equatable {
         hostsAwaitingSnapshot: Set<Host.ID> = [],
         hostStandingFailures: [Host.ID: TransportError] = [:]
     ) {
-        let hostName = hosts.first { $0.id == agentID.hostID }?.displayName
+        let host = hosts.first { $0.id == agentID.hostID }
+        let hostName = host?.displayName
+        let usesHerdrEndpoint = host?.herdrEndpoint != nil
         func named(_ text: String) -> String {
             hostName.map { "\($0): \(text)" } ?? text
         }
@@ -2221,7 +2674,7 @@ struct MissingAgentPresentation: Equatable {
                 "Host Unavailable",
                 failure.isHostKeySecurityFailure
                     ? "exclamationmark.shield.fill" : "exclamationmark.triangle.fill",
-                named(failure.presentation.message)
+                named(failure.presentation(usesHerdrEndpoint: usesHerdrEndpoint).message)
             )
         }
         let hostStatus = hostStatuses[agentID.hostID]
@@ -2258,15 +2711,25 @@ struct MissingAgentPresentation: Equatable {
                 cause = .paneGone
                 title = "Agent Gone"
                 systemImage = "rectangle.on.rectangle.slash"
-                message = "This Agent's pane is no longer reported."
+                message = Self.paneGoneMessage
             }
         case .ended, nil:
+            // No live inventory says why: an ended session, or a deleted
+            // Host whose projection is gone, where no Agent comes back.
             cause = .paneGone
             title = "Agent Gone"
             systemImage = "rectangle.on.rectangle.slash"
-            message = "This Agent's pane is no longer reported."
+            message = Self.unreportedMessage
         }
     }
+
+    /// herdr drops an Agent whose program exits from a pane that stays, as
+    /// it does one whose pane closed; the same pane rebinds when an Agent
+    /// starts in it again.
+    static let paneGoneMessage =
+        "The Agent in this pane has exited, or the pane was closed. It shows here again if an Agent starts in the pane."
+
+    static let unreportedMessage = "This Agent's pane is no longer reported."
 
     /// What the Console's detail column shows when the selected Agent is not
     /// in the list.
@@ -2307,6 +2770,15 @@ private struct ConsoleHostSectionHeaderView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(presentation.readiness.nameEmphasis.color)
                     .lineLimit(1)
+                // Rows under a Host that is not connected may be saved Chat
+                // entry points; the header says why in words, not only in
+                // the badge.
+                if presentation.readiness.tone != .connected {
+                    Text(presentation.readiness.text)
+                        .font(.footnote)
+                        .foregroundStyle(presentation.readiness.tone.tint)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 0)
                 if presentation.showsStatusPills {
                     ConsoleHostStatusCountPills(items: presentation.statusItems)
@@ -2350,22 +2822,59 @@ struct AgentDetailStage {
 
 /// Mirrors the Live Activity count chips so a collapsed Host communicates
 /// the same status distribution at a glance.
-private struct ConsoleHostStatusCountPills: View {
+struct ConsoleHostStatusCountPills: View {
     let items: [ConsoleHostAgentStatusCount]
+    /// Stacks the pills where one line cannot hold them, as a card's
+    /// summary needs at large text sizes.
+    var wraps = false
 
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(items) { item in
-                Text("\(item.count) \(item.status.rawValue)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(Color(item.status.inkUIColor))
-                    .fixedSize()
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        Color(item.status.tintUIColor).opacity(0.15),
-                        in: Capsule())
+        if wraps {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 5) { pills }
+                VStack(alignment: .leading, spacing: 4) { pills }
             }
+        } else {
+            HStack(spacing: 5) { pills }
+        }
+    }
+
+    private var pills: some View {
+        ForEach(items) { @Sendable item in
+            Text("\(item.count) \(item.status.rawValue)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color(item.status.inkUIColor))
+                .fixedSize()
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    Color(item.status.tintUIColor).opacity(0.15),
+                    in: Capsule())
+        }
+    }
+}
+
+/// The Agents list's style: plain rows, or for By Workspace an inset
+/// grouped list of cards on the other presentations' page.
+private struct ConsoleAgentListStyle: ViewModifier {
+    let showsCards: Bool
+    @Environment(\.isSidebarColumn) private var isSidebarColumn
+    @Environment(\.defaultMinListRowHeight) private var minRowHeight
+
+    func body(content: Content) -> some View {
+        if showsCards {
+            content
+                // A card's rows keep the list's shortest row themselves, so
+                // a collapsed card's summary can be shorter.
+                .environment(\.defaultMinListRowHeight, 0)
+                .environment(\.workspaceCardMinRowHeight, minRowHeight)
+                .listStyle(.insetGrouped)
+                .listSectionSpacing(.custom(ConsoleWorkspaceCardMetrics.gap))
+                .scrollContentBackground(.hidden)
+                // Beside the sidebar, its glass, as the plain list shows.
+                .background(isSidebarColumn ? Color.clear : Color(uiColor: .systemBackground))
+        } else {
+            content.listStyle(.plain)
         }
     }
 }
@@ -2392,6 +2901,9 @@ extension EnvironmentValues {
     /// column's top edge to clear the chrome above its navigation bar. Zero
     /// in compact width; the screens still clear the status bar themselves.
     @Entry var detailTopChromeInset: CGFloat = 0
+    /// The detail column's navigation bar row in regular width, in the same
+    /// coordinates as `detailTopChromeInset`; nil in compact width.
+    @Entry var detailBarRow: NavigationBarBand? = nil
     /// The edges a detail screen's full-bleed surface fills past the safe
     /// area. Beside an opaque sidebar the leading one lies under the
     /// sidebar; every other edge, an iPhone's landscape insets included, is
@@ -2406,11 +2918,13 @@ extension EnvironmentValues {
     /// edge swipe calls it in place of going back; nil where the detail has
     /// no sidebar to show.
     @Entry var revealDetailSidebar: (@MainActor @Sendable () -> Void)? = nil
-    /// The detail is pushed over the list on an iPhone, so it shows its own
-    /// floating header with a Back button. False in regular columns,
-    /// including a large iPhone in landscape, and on an iPad, where an edge
-    /// swipe or the sidebar leads back.
-    @Entry var showsDetailBackHeader = false
+    /// The detail is pushed over the list, on an iPhone or in a compact iPad
+    /// window, so its floating header carries a Back button. A window's
+    /// resize edge takes touches near its side, so in a narrow iPad window an
+    /// edge swipe alone would leave no way back. False in regular columns,
+    /// including a large iPhone in landscape, where the sidebar stands beside
+    /// the detail and the header keeps only its other buttons.
+    @Entry var showsDetailBackButton = false
 }
 
 /// A navigation bar's vertical extent in its column's own coordinates.

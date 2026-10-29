@@ -149,16 +149,15 @@ struct AgentRowLayout: Codable, Equatable, Sendable {
     static let maximumTokensPerRow = 16
     /// Console row slots: Row 1 and Row 2 follow herdr, Row 3 is Heeler's.
     static let maximumConsoleRows = 3
-    /// Wire-faithful copy of herdr's default sidebar rows, used when a Host
-    /// has no snapshot. Still carries `state_icon`; the Console never does.
+    /// herdr's default sidebar rows without `machine`, used when a Host has
+    /// no snapshot. herdr 0.9.0 and later add `machine` after `state_icon`,
+    /// which Heeler does not render. Still carries `state_icon`; the Console
+    /// never does.
     static let heelerDefault = AgentRowLayout(rows: [
         [.init(.stateIcon), .init(.workspace), .init(.tab)], [.init(.agent)],
     ])
     /// Fallback sidebar fields with Heeler's default directory row.
     static let consoleDefault = heelerDefault.withHeelerRow()
-    /// A By Workspace row: its section header already names the Workspace
-    /// and Host, so the row keeps to the Agent's name and its path.
-    static let workspaceSection = AgentRowLayout(rows: [[.init(.agent)], [.init(.directory)]])
 
     var rowGap: Int
     var rows: [AgentRow]

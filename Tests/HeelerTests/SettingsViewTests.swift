@@ -12,12 +12,48 @@ struct SettingsViewTests {
         #expect(ConsoleListPresentationMode.flat.title == "All Agents")
     }
 
+    @Test func overlayNetworksRouteConstructsTheNetworksScreen() {
+        let destination = SettingsView.overlayNetworksDestination
+        #expect(destination.rawValue == "settings.overlayNetworks")
+        #expect(
+            destination.destinationTypeName
+                == String(reflecting: OverlayNetworksSettingsView.self))
+    }
+
     @Test func repositoryLinkTargetsTheProject() throws {
         let repositoryURL = try #require(SettingsView.repositoryURL)
 
         #expect(
             repositoryURL.absoluteString
                 == "https://github.com/ZingerLittleBee/Heeler")
+    }
+
+    @Test func setupGuideAnchorsAnExistingReadmeHeading() throws {
+        // GitHub drops an unknown fragment silently and opens the README top,
+        // so a renamed heading would leave the guide link quietly wrong.
+        let url = try #require(HostSetupGuide.url)
+        let repositoryURL = try #require(SettingsView.repositoryURL)
+        #expect(url.absoluteString.hasPrefix(repositoryURL.absoluteString + "#"))
+        let fragment = try #require(url.fragment)
+
+        let readme = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("README.md"),
+            encoding: .utf8)
+        let headingSlugs = readme.split(separator: "\n")
+            .filter { $0.hasPrefix("## ") }
+            .map { $0.dropFirst(3).lowercased().replacingOccurrences(of: " ", with: "-") }
+        #expect(headingSlugs.contains(fragment))
+    }
+
+    @Test func setupGuideRoutePushesTheGuideForReference() throws {
+        #expect(SettingsView.aboutRows.contains(.setupGuide))
+        let destination = try #require(SettingsView.aboutDestination(for: .setupGuide))
+        #expect(destination.rawValue == SettingsView.AboutRow.setupGuide.id)
+        #expect(destination.destinationTypeName == String(reflecting: HostSetupGuideView.self))
     }
 
     @Test func acknowledgementsRouteIsOfferedUnderAboutByIdentity() throws {

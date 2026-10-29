@@ -140,6 +140,20 @@ struct AgentRowRendererTests {
                 == ["Working"])
     }
 
+    @Test func anUnknownStatusIsLeftOutOfTheRow() {
+        let unknown = ConsoleAgent(
+            hostID: UUID(), hostName: "Studio Mac",
+            agent: Agent(
+                terminalID: "term", kind: "claude", title: "Fix", status: .unknown,
+                workspaceID: "w", tabID: "t", paneID: "p", cwd: "/work/heeler", revision: 1),
+            workspaceLabel: nil, repositoryCheckout: nil)
+        let layout = AgentRowLayout(rows: [[.init(.host), .init(.status), .init(.directory)]])
+        #expect(AgentRowRenderer.render(layout: layout, agent: unknown).map { $0.map(\.text).joined() }
+                == ["Studio Mac · /work/heeler"])
+        #expect(AgentStatus.unknown.displayTitle == nil)
+        #expect(AgentStatus(rawValue: "paused").displayTitle == "Paused")
+    }
+
     @Test func missingTitlesAndWorkspaceNeverRenderOpaqueIDs() {
         let row = ConsoleAgent(hostID: UUID(), hostName: "Host", agent: Agent(
             terminalID: "terminal", kind: "codex", title: "Legacy title", status: .idle,

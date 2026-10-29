@@ -36,8 +36,8 @@ struct AgentListFieldsAddFieldSheet: View {
                 } else {
                     if !availableHerdrFields.isEmpty {
                         Section {
-                            ForEach(availableHerdrFields, id: \.self) { token in
-                                fieldButton(for: token)
+                            ForEach(availableHerdrFields, id: \.self) { @Sendable token in
+                                MainActorContent { fieldButton(for: token) }
                             }
                         } header: {
                             Text("herdr fields")
@@ -45,8 +45,8 @@ struct AgentListFieldsAddFieldSheet: View {
                     }
                     if !availableHeelerFields.isEmpty {
                         Section {
-                            ForEach(availableHeelerFields, id: \.self) { token in
-                                fieldButton(for: token)
+                            ForEach(availableHeelerFields, id: \.self) { @Sendable token in
+                                MainActorContent { fieldButton(for: token) }
                             }
                         } header: {
                             Text("Heeler fields")

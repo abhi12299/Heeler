@@ -58,6 +58,9 @@ final class NotificationPreferencesStore {
     /// empty/default setting — leaves each Host's `notify.json` untouched (#76).
     private let relayBaseURL: @MainActor () -> URL?
     private let ceremony: NotificationRegistrationCeremony
+    /// Fires after a registration write the Host confirmed, so Live
+    /// Activity writes that failed for want of an entry can retry.
+    @ObservationIgnored var onRegistered: (@MainActor (Host.ID) -> Void)?
 
     init(
         transports: any NotificationTransportProvider,
@@ -96,16 +99,15 @@ final class NotificationPreferencesStore {
             settings.isRegistered != enabled
         else { return }
         let relay = relayBaseURL()
-        await write(for: host, from: settings) { ceremony, token, transport in
+        await write(for: host, from: settings, registers: enabled) { ceremony, token, transport in
             if enabled {
                 let notify = NotificationTriggerPreferences()
                 try await ceremony.register(
-                    hostID: host.id, hostName: host.displayName,
-                    deviceToken: token, notify: notify, relayBaseURL: relay, over: transport)
+                    host: host, deviceToken: token, notify: notify, relayBaseURL: relay,
+                    over: transport)
                 return HostSettings(isRegistered: true, notify: notify)
             } else {
-                try await ceremony.remove(
-                    hostID: host.id, deviceToken: token, over: transport)
+                try await ceremony.remove(host: host, deviceToken: token, over: transport)
                 return HostSettings(
                     isRegistered: false, notify: NotificationTriggerPreferences())
             }
@@ -122,14 +124,73 @@ final class NotificationPreferencesStore {
         let notify = NotificationTriggerPreferences(
             blocked: settings.notify.blocked, done: enabled)
         let relay = relayBaseURL()
-        await write(for: host, from: settings) { ceremony, token, transport in
-            // Re-registration is the flag update: it upserts this device's
+        await write(for: host, from: settings, registers: true) { ceremony, token, transport in
+            // Re-registration is the flag update: it rewrites this Host's
             // entry reusing the stored Notification Key (#72 idempotence).
             try await ceremony.register(
-                hostID: host.id, hostName: host.displayName,
-                deviceToken: token, notify: notify, relayBaseURL: relay, over: transport)
+                host: host, deviceToken: token, notify: notify, relayBaseURL: relay,
+                over: transport)
             return HostSettings(isRegistered: true, notify: notify)
         }
+    }
+
+    // MARK: Host removal (#414)
+
+    /// Whether this device holds a Notification Key for the Host, i.e.
+    /// removing the Host deletes one. A Keychain that cannot be read counts
+    /// as holding one: the removal will try to delete it.
+    func hasNotificationKey(for hostID: Host.ID) -> Bool {
+        do {
+            return try ceremony.keys.record(forHost: hostID) != nil
+        } catch {
+            return true
+        }
+    }
+
+    /// Best effort, before a Host is removed: drops this device's own entries
+    /// from the Host's registration file so its plugin stops pushing here,
+    /// keeping the Notification Key (`forgetNotificationKey` deletes it).
+    /// Entries are matched by the key alone, so no device token is needed.
+    /// Only a connected Host with a stored key is asked; anything else
+    /// touches no network. The whole revoke, gate wait included, is
+    /// abandoned after `timeout`: a dead link waits out its own request
+    /// deadline and redial, and removal must not. Failures are swallowed;
+    /// the removal goes ahead either way. A revoke the Host confirmed reads
+    /// unregistered at once, so a removal that then fails keeps the Host
+    /// with notifications off.
+    func revokeRegistration(
+        for host: Host, isConnected: Bool, timeout: Duration = .seconds(6)
+    ) async {
+        guard isConnected, (try? ceremony.keys.record(forHost: host.id)) != nil else { return }
+        let ceremony = ceremony
+        let transports = transports
+        do {
+            try await AsyncDeadline.run(for: timeout) {
+                try await transports.withNotificationTransport(for: host.id) { transport in
+                    try await ceremony.revoke(host: host, over: transport)
+                }
+            }
+        } catch {
+            return
+        }
+        markUnregistered(host.id)
+    }
+
+    /// Deletes the Host's Notification Key record (Keychain and app-group
+    /// mirror) as part of its removal. Without a key no entry on the Host is
+    /// this device's own, so a confirmed state now reads unregistered: a
+    /// removal that fails after this keeps the Host with notifications off.
+    func forgetNotificationKey(for hostID: Host.ID) throws {
+        try ceremony.keys.removeRecord(forHost: hostID)
+        markUnregistered(hostID)
+    }
+
+    /// Settles a confirmed state on unregistered; one still loading or
+    /// updating is left for its own read or write to settle.
+    private func markUnregistered(_ hostID: Host.ID) {
+        guard confirmedSettings(for: hostID) != nil else { return }
+        states[hostID] = .idle(
+            HostSettings(isRegistered: false, notify: NotificationTriggerPreferences()))
     }
 
     private func load(_ host: Host) async {
@@ -141,8 +202,14 @@ final class NotificationPreferencesStore {
         }
         states[host.id] = .loading
         do {
-            let file = try await readFile(for: host.id)
-            let preferences = file.preferences(token: token.hex)
+            var file = try await readFile(for: host.id)
+            // Only an entry carrying this Host's Notification Key is its own;
+            // another Host of the same remote user shares this file (#412).
+            let owner = try ceremony.registrationOwner(for: host, deviceToken: token)
+            if let owner, file.normalized(for: owner) != file {
+                file = await migrate(host, token: token) ?? file
+            }
+            let preferences = owner.flatMap { file.preferences(for: $0) }
             states[host.id] = .idle(
                 HostSettings(
                     isRegistered: preferences != nil,
@@ -152,12 +219,26 @@ final class NotificationPreferencesStore {
         }
     }
 
+    /// Moves this Host's entry to its current herdr session (an entry an
+    /// older app wrote, or one from before a session edit). Best-effort: a
+    /// failed write leaves the state derived from the plain read, and the
+    /// next refresh retries.
+    private func migrate(
+        _ host: Host, token: APNSDeviceToken
+    ) async -> NotificationRegistrationFile? {
+        let ceremony = ceremony
+        return try? await transports.withNotificationTransport(for: host.id) { transport in
+            try await ceremony.migrate(host: host, deviceToken: token, over: transport)
+        }
+    }
+
     /// Shared write choreography: hold the confirmed settings while the
     /// ceremony runs, publish the new truth on success, snap back with the
     /// error on failure (fail loudly — never a silently divergent toggle).
     private func write(
         for host: Host,
         from settings: HostSettings,
+        registers: Bool,
         _ operation: @escaping @Sendable (
             NotificationRegistrationCeremony, APNSDeviceToken, any Transport
         ) async throws -> HostSettings
@@ -176,8 +257,26 @@ final class NotificationPreferencesStore {
                 try await operation(ceremony, token, transport)
             }
             states[host.id] = .idle(confirmed)
+            if registers {
+                onRegistered?(host.id)
+                await reloadRegisteredHosts(except: host.id)
+            }
         } catch {
             states[host.id] = .failed(message: Self.message(for: error), settings: settings)
+        }
+    }
+
+    /// A registration takes over its herdr session's entry, so another Host
+    /// of the same remote user on that session may have just lost its own
+    /// (#412). Only Hosts that read registered can be affected.
+    private func reloadRegisteredHosts(except hostID: Host.ID) async {
+        let affected = hosts.filter { host in
+            host.id != hostID && confirmedSettings(for: host.id)?.isRegistered == true
+        }
+        await withTaskGroup { group in
+            for host in affected {
+                group.addTask { await self.load(host) }
+            }
         }
     }
 
@@ -210,7 +309,8 @@ final class NotificationPreferencesStore {
     static func message(for error: any Error) -> String {
         switch error {
         case NotificationRegistrationError.pluginNotInstalled:
-            "Install the Heeler plugin on this Host, then check again."
+            "The Heeler plugin is missing or turned off on this Host. "
+                + "See this Host's page in Hosts, then check again."
         case NotificationRegistrationError.pluginProbeFailed:
             "Could not check the Heeler plugin on this Host. "
                 + "Check the connection and try again."
@@ -230,6 +330,8 @@ final class NotificationPreferencesStore {
             "The Host did not answer in time."
         case TransportError.herdrBinaryNotFound:
             TransportError.herdrBinaryNotFound.presentation.message
+        case TransportError.herdrLauncherNotFound(let path):
+            TransportError.herdrLauncherNotFound(path: path).presentation.message
         case is TransportError:
             "The connection to the Host failed."
         default:

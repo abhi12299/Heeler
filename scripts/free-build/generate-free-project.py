@@ -89,8 +89,12 @@ def free_spec(spec, team, bundle_id):
     app["entitlements"] = {"path": str(OUT / "Heeler.entitlements"), "properties": {}}
     app["info"]["path"] = str(OUT / "Info.plist")
     # Background Alerts stay running on a silent, mixable audio session:
-    # a background mode is an Info.plist key, not an entitlement.
-    app["info"]["properties"]["UIBackgroundModes"] = ["audio"]
+    # a background mode is an Info.plist key, not an entitlement. Added to
+    # the committed modes, not in place of them: the app registers its
+    # Usage refresh task, which needs `fetch` declared.
+    modes = app["info"]["properties"].setdefault("UIBackgroundModes", [])
+    if "audio" not in modes:
+        modes.append("audio")
     # Off its info path, the committed Info.plist would be copied in as a
     # resource and collide with the generated one.
     for source in app["sources"]:

@@ -26,8 +26,19 @@ AGENT_PANE_BUSY = {
     "code": "agent_pane_busy",
     "message": "pane is not an available shell",
 }
-# Any API error that is not `agent_pane_busy`, which is the whole contract the
-# compensating close and remove hang off. The code is the fixture's own on
+# herdr 0.9.4's macOS refusal of a launch line longer than the terminal's
+# canonical input limit while the fresh shell is still in canonical mode,
+# verbatim from a live 0.9.4 Host given a 1,100-character argument.
+CANONICAL_MODE_REFUSAL = {
+    "code": "agent_start_input_failed",
+    "message": (
+        "input contains a 1108-byte line but the terminal is in canonical mode "
+        "with a 1024-byte limit; wait for the shell prompt and retry"
+    ),
+}
+# Any API error the shell-readiness wait does not resend: neither
+# `agent_pane_busy` nor the canonical-mode refusal. That is the whole contract
+# the compensating close and remove hang off. The code is the fixture's own on
 # purpose: herdr 0.7.5's refusal of an unsupported kind is recorded only by its
 # message, so inventing a plausible code here would read as a verified fact.
 NON_RETRYABLE_START_FAILURE = {
@@ -279,9 +290,13 @@ class Server:
     def _scripted_error(self, method: str, token: Optional[str]) -> Optional[dict]:
         """The failure a token scripts for `agent.start`, or None to succeed.
 
-        `busyN` refuses the first N starts the way herdr 0.7.5 refuses a pane
-        whose shell has not reached its prompt, then lets the launch through;
-        `busyforever` never lets it through; `startfails` refuses once with a
+        `busyN` refuses the first N starts with `agent_pane_busy`, the way
+        herdr refuses a pane while a startup command holds its foreground,
+        then lets the launch through; `canonN` refuses the first N starts
+        alternating herdr 0.9.4's canonical-mode refusal (first) with
+        `agent_pane_busy`, since a booting shell can answer both within one
+        wait, then lets the launch through; `busyforever` never lets it
+        through; `startfails` refuses once with a
         code no retry policy may swallow; `startdrop` is handled in `_serve`
         by closing the channel with no reply (an ambiguous transport failure);
         `ok` scripts no failure at all. `renamefail` refuses only `tab.rename`
@@ -328,6 +343,15 @@ class Server:
             if served < int(behavior[4:]):
                 return dict(AGENT_PANE_BUSY)
             return None
+        if behavior.startswith("canon") and behavior[5:].isdigit():
+            with self.script_lock:
+                served = self.agent_start_attempts.get(token, 0)
+                self.agent_start_attempts[token] = served + 1
+            if served >= int(behavior[5:]):
+                return None
+            if served % 2 == 0:
+                return dict(CANONICAL_MODE_REFUSAL)
+            return dict(AGENT_PANE_BUSY)
         return {
             "code": "fixture_unknown_behavior",
             "message": "no scripted behaviour named " + behavior,
@@ -427,6 +451,28 @@ class Server:
             return {"protocol": 17, "version": "fake"}
         if method == "agent.list":
             return {"type": "agent_list", "agents": []}
+        if method == "plugin.list":
+            # herdr's InstalledPluginInfo, with manifest fields the app ignores
+            # (a numeric popup size included) and an unrelated plugin first.
+            return {
+                "type": "plugin_list",
+                "plugins": [
+                    {"plugin_id": "other", "name": "other", "version": "9.9.9",
+                     "manifest_path": "/plugins/other/herdr-plugin.toml",
+                     "plugin_root": "/plugins/other", "enabled": True},
+                    {"plugin_id": "heeler", "name": "heeler", "version": "0.6.0",
+                     "manifest_path": "/plugins/heeler/herdr-plugin.toml",
+                     "plugin_root": "/plugins/heeler", "enabled": True,
+                     "min_herdr_version": "0.7.5", "platforms": ["linux", "macos"],
+                     "panes": [{"id": "pair", "title": "Pair device",
+                                "placement": "popup", "width": 80, "height": "100%",
+                                "command": ["node", "src/pair-popup.js"]}],
+                     "source": {"kind": "github", "owner": "ZingerLittleBee",
+                                "repo": "Heeler", "subdir": "plugin",
+                                "requested_ref": "main"},
+                     "warnings": []},
+                ],
+            }
         if method == "session.snapshot":
             return {
                 "type": "session_snapshot",

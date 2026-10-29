@@ -829,8 +829,8 @@ struct StartAgentStoreTests {
     }
 
     /// The tab label is free text next to the slug-constrained agent name:
-    /// trimmed on the way out, and dropped when empty so the Transport
-    /// falls back to the agent's name.
+    /// trimmed on the way out, and dropped when empty so automatic tab
+    /// titles stay available.
     @Test func submitForwardsATrimmedTabLabelAndDropsAnEmptyOne() async {
         let host = Host.fixture()
         let recorder = StartRecorder()
@@ -847,14 +847,12 @@ struct StartAgentStoreTests {
 
         #expect(store.state == started(on: host))
         #expect(recorder.params.first?.tabLabel == "Fix login bug")
-        #expect(recorder.params.first?.resolvedTabLabel == "Fix login bug")
 
         store.tabLabel = " \t "
         await store.submit()
 
         #expect(recorder.params.count == 2)
         #expect(recorder.params.last?.tabLabel == nil)
-        #expect(recorder.params.last?.resolvedTabLabel == "reviewer")
     }
 
     @Test func submitDispatchesAgentStartWithQwenKind() async {
@@ -914,6 +912,71 @@ struct StartAgentStoreTests {
                         + "Update herdr on this Host to v0.9.0 or later for Muse support, "
                         + "or choose another supported Agent."))
         #expect(recorder.params.map(\.kind) == ["muse"])
+    }
+
+    /// herdr 0.9.4 on a macOS Host refuses a long launch line until the fresh
+    /// shell's line editor starts, and the Transport waits that out, so the
+    /// refusal reaches New Agent only when the wait ran out, as it does for
+    /// dash. herdr's own text says to wait for the prompt; the copy says what
+    /// the user can change instead.
+    @Test func submitAsksToShortenArgumentsTheHostsShellNeverAccepted() async {
+        let host = Host.fixture()
+        let recorder = StartRecorder()
+        recorder.error = HerdrAPIError(
+            code: "agent_start_input_failed",
+            message: "input contains a 1108-byte line but the terminal is in canonical mode "
+                + "with a 1024-byte limit; wait for the shell prompt and retry")
+        let store = makeStore(
+            hosts: [host],
+            workspaces: { _ in [ConsoleWorkspace(id: "w1", label: "Proj")] },
+            recorder: recorder)
+        store.arguments = String(repeating: "x", count: 1_100)
+        await store.discoverAgents()
+
+        await store.submit()
+
+        #expect(
+            store.state
+                == .failed(
+                    "The Host's shell didn't accept a launch command this long within 10 seconds. "
+                        + "On a Mac, herdr accepts at most 1,024 bytes until the shell's line "
+                        + "editor starts, and some shells, such as dash, never start one. "
+                        + "Shorten the arguments and try again."))
+    }
+
+    /// Only the canonical-mode refusal gets that copy. A wait that ends busy
+    /// says nothing about the launch line's length, and herdr's sibling
+    /// "could not determine canonical input capacity" is a different failure,
+    /// so both keep herdr's own text.
+    @Test func submitKeepsHerdrsTextForOtherShellRefusals() async {
+        let host = Host.fixture()
+        let workspaces: (Host.ID) -> [ConsoleWorkspace] = { _ in
+            [ConsoleWorkspace(id: "w1", label: "Proj")]
+        }
+
+        let busy = StartRecorder()
+        busy.error = HerdrAPIError(
+            code: "agent_pane_busy",
+            message: "agent target pane w1:pA is not an available shell")
+        let first = makeStore(hosts: [host], workspaces: workspaces, recorder: busy)
+        await first.discoverAgents()
+        await first.submit()
+        #expect(
+            first.state
+                == .failed(
+                    "herdr rejected the command: agent target pane w1:pA is not an available shell"
+                ))
+
+        let capacity = StartRecorder()
+        capacity.error = HerdrAPIError(
+            code: "agent_start_input_failed",
+            message: "could not determine canonical input capacity")
+        let second = makeStore(hosts: [host], workspaces: workspaces, recorder: capacity)
+        await second.discoverAgents()
+        await second.submit()
+        #expect(
+            second.state
+                == .failed("herdr rejected the command: could not determine canonical input capacity"))
     }
 
     @Test func submitKeepsGenericCopyForUnrelatedAgentStartErrors() async {

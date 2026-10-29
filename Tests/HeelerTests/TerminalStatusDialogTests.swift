@@ -60,6 +60,30 @@ struct TerminalStatusDialogTests {
             "card drew \(String(inside, radix: 16)), expected ~\(String(expected, radix: 16))")
     }
 
+    @Test func thePrimaryButtonIsFilledWithTheThemeForegroundNotItsAccent() async throws {
+        // Vesper's ANSI blue is a light lavender; the system's white label on
+        // it was barely legible. The fill is now the theme foreground.
+        let palette = TerminalThemeOption.vesper.palette(for: .dark)
+        let image = try await Self.render(
+            TerminalStatusDialog(
+                glyph: .symbol("exclamationmark.triangle"),
+                title: "Couldn't Open Terminal",
+                palette: palette,
+                dimsBackground: false
+            ) {
+                Button("Try Again") {}
+                    .buttonStyle(.terminalStatusPrimary)
+            })
+
+        // Only the button fill is a wide solid run; title glyphs are not.
+        let width = try #require(image.cgImage?.width)
+        let foregroundRun = try #require(
+            Self.longestRun(of: Self.packed(palette.foreground), in: image))
+        let accentRun = try #require(Self.longestRun(of: Self.packed(palette.accent), in: image))
+        #expect(foregroundRun > width / 5, "no foreground-filled button (longest run \(foregroundRun)px)")
+        #expect(accentRun < width / 20, "the accent still fills something (run \(accentRun)px)")
+    }
+
     /// Pure red, so anything drawn over it is unmistakable.
     private static let backdrop: UInt32 = 0xFF00_0000 >> 8
 
@@ -100,20 +124,41 @@ struct TerminalStatusDialogTests {
     }
 
     private static func color(in image: UIImage, atUnit point: CGPoint) -> UInt32? {
+        guard let (pixels, width, height) = rgb(of: image) else { return nil }
+        let x = min(width - 1, max(0, Int(point.x * CGFloat(width))))
+        let y = min(height - 1, max(0, Int(point.y * CGFloat(height))))
+        return pixels[y * width + x]
+    }
+
+    /// The longest horizontal run of pixels within a few levels of `color`.
+    private static func longestRun(of color: UInt32, in image: UIImage) -> Int? {
+        guard let (pixels, width, height) = rgb(of: image) else { return nil }
+        var longest = 0
+        for y in 0..<height {
+            var run = 0
+            for x in 0..<width {
+                run = channelDistance(pixels[y * width + x], color) <= 8 ? run + 1 : 0
+                longest = max(longest, run)
+            }
+        }
+        return longest
+    }
+
+    private static func rgb(of image: UIImage) -> ([UInt32], Int, Int)? {
         guard let cgImage = image.cgImage else { return nil }
         let width = cgImage.width, height = cgImage.height
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
         guard
             let context = CGContext(
-                data: &pixels, width: width, height: height, bitsPerComponent: 8,
+                data: &bytes, width: width, height: height, bitsPerComponent: 8,
                 bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        let x = min(width - 1, max(0, Int(point.x * CGFloat(width))))
-        let y = min(height - 1, max(0, Int(point.y * CGFloat(height))))
-        let i = (y * width + x) * 4
-        return UInt32(pixels[i]) << 16 | UInt32(pixels[i + 1]) << 8 | UInt32(pixels[i + 2])
+        let pixels = (0..<(width * height)).map { p in
+            let i = p * 4
+            return UInt32(bytes[i]) << 16 | UInt32(bytes[i + 1]) << 8 | UInt32(bytes[i + 2])
+        }
+        return (pixels, width, height)
     }
 }

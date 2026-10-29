@@ -186,11 +186,7 @@ struct ChangesRowTotals: View {
     private func totals(_ badge: ChangesBadge, style: ChangesBadge.Style) -> some View {
         HStack(spacing: 4) {
             if badge.showsFiles {
-                // Gray, as the Tide git item draws them on the status line.
-                ForEach(badge.fileCounts, id: \.symbol) { count in
-                    Text(badge.fileCountText(count, style: style, locale: locale))
-                        .foregroundStyle(.secondary)
-                }
+                fileCounts(badge, style: style)
             } else {
                 if badge.showsAdded {
                     Text(badge.addedText(style, locale: locale))
@@ -210,5 +206,20 @@ struct ChangesRowTotals: View {
         .accessibilityLabel("Changes: " + badge.accessibilityValue)
         // VoiceOver hears exact counts either way; this says which one shows.
         .accessibilityIdentifier(identifier + (style == .exact ? ".exact" : ".compact"))
+    }
+
+    /// Tide's file counts, gray, as the Tide git item draws them on the status line.
+    ///
+    /// SwiftUI can build these cells on its async render thread
+    /// (FB20692404). A main-actor cell closure checks its isolation on entry,
+    /// and on iOS 18 that check traps there (#471), so the closure is
+    /// `@Sendable` and takes the locale by value.
+    func fileCounts(
+        _ badge: ChangesBadge, style: ChangesBadge.Style
+    ) -> ForEach<[TideGitItem.FileCount], String, some View> {
+        ForEach(badge.fileCounts, id: \.symbol) { @Sendable [locale] count in
+            Text(badge.fileCountText(count, style: style, locale: locale))
+                .foregroundStyle(.secondary)
+        }
     }
 }

@@ -802,3 +802,107 @@ suite("notify-hook: configuration and registration file", () => {
     assert.equal(relay.requests.length, 0);
   });
 });
+
+suite("notify-hook: herdr sessions", () => {
+  const DEFAULT_SOCKET = "/home/ada/.config/herdr/herdr.sock";
+  const socketFor = (session) => `/home/ada/.config/herdr/sessions/${session}/herdr.sock`;
+  const TOKEN_C = "c".repeat(64);
+
+  test("a hook delivers to legacy entries and entries of its own session only", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([
+      device(),
+      device({ token: TOKEN_B, key: KEY_B, session: "" }),
+      device({ token: TOKEN_C, session: "work" }),
+    ]);
+    writeHerdrStub({ status: "blocked" });
+
+    const result = await runHook(statusEvent("blocked"), {
+      env: { HERDR_SOCKET_PATH: socketFor("work") },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(relay.requests.map((r) => r.body.token).sort(), [TOKEN_A, TOKEN_C]);
+  });
+
+  test("an unknown socket shape delivers to legacy entries only", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([
+      device(),
+      device({ token: TOKEN_B, key: KEY_B, session: "" }),
+      device({ token: TOKEN_C, session: "work" }),
+    ]);
+    writeHerdrStub({ status: "blocked" });
+
+    const result = await runHook(statusEvent("blocked"), {
+      env: { HERDR_SOCKET_PATH: "/tmp/custom-herdr.sock" },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(relay.requests.map((r) => r.body.token), [TOKEN_A]);
+  });
+
+  test("a session without its own entries makes no herdr calls", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([device({ session: "work" })]);
+    writeHerdrStub({ status: "blocked" });
+
+    const result = await runHook(statusEvent("blocked"), {
+      env: { HERDR_SOCKET_PATH: DEFAULT_SOCKET },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(relay.requests.length, 0);
+    assert.equal(stubInvocations().length, 0);
+  });
+
+  test("the same pane id dedupes independently in each session", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([device()]);
+    writeHerdrStub({ status: "blocked" });
+
+    await runHook(statusEvent("blocked"), { env: { HERDR_SOCKET_PATH: DEFAULT_SOCKET } });
+    await runHook(statusEvent("blocked"), { env: { HERDR_SOCKET_PATH: socketFor("work") } });
+    assert.equal(relay.requests.length, 2);
+
+    // Each session's own repeat is still deduped.
+    await runHook(statusEvent("blocked"), { env: { HERDR_SOCKET_PATH: DEFAULT_SOCKET } });
+    await runHook(statusEvent("blocked"), { env: { HERDR_SOCKET_PATH: socketFor("work") } });
+    assert.equal(relay.requests.length, 2);
+
+    // The default session keeps the pre-session state path; named sessions nest.
+    const marker = `${Buffer.from(PANE_ID, "utf8").toString("base64url")}.json`;
+    assert.ok(existsSync(join(stateDir, "notify", marker)));
+    assert.ok(existsSync(join(stateDir, "sessions", "work", "notify", marker)));
+  });
+
+  test("a 410 prunes every entry of the token, whatever its session", async () => {
+    await startFakeRelay((request) =>
+      request.body.token === TOKEN_A
+        ? { status: 410, body: { reason: "Unregistered" } }
+        : { status: 200, body: { apnsId: "x" } },
+    );
+    writeConfig();
+    writeRegistration([
+      device({ session: "" }),
+      device({ key: KEY_B, session: "work" }),
+      device({ token: TOKEN_B, key: KEY_B, session: "work" }),
+    ]);
+    writeHerdrStub({ status: "blocked" });
+
+    const result = await runHook(statusEvent("blocked"), {
+      env: { HERDR_SOCKET_PATH: DEFAULT_SOCKET },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(relay.requests.map((r) => r.body.token), [TOKEN_A]);
+    assert.deepEqual(
+      readRegistration().devices.map((d) => [d.token, d.session]),
+      [[TOKEN_B, "work"]],
+    );
+  });
+});

@@ -83,7 +83,7 @@ struct ConsoleHostIssueList: View {
                         .foregroundStyle(Color.primary)
                     // Chips wrap whole, never splitting "1 connecting".
                     ChipWrap(spacing: 12, lineSpacing: 2) {
-                        ForEach(summary.counts, id: \.text) { count in
+                        ForEach(summary.counts, id: \.text) { @Sendable count in
                             HStack(spacing: 5) {
                                 Circle()
                                     .fill(count.tone.tint)
@@ -113,7 +113,7 @@ struct ConsoleHostIssueList: View {
 /// The Hosts behind the flat lists' summary, in a sheet. A Host that cannot
 /// connect pushes the connection detail its own row would open; any other
 /// navigable condition opens the Host in the Hosts tab.
-struct ConsoleHostIssuesSheet<Detail: View>: View {
+struct ConsoleHostIssuesSheet<Detail: View & SendableMetatype>: View {
     let issues: [ConsoleHostStatusPresentation]
     /// Hosts the connection detail explains, which push it.
     let explained: Set<Host.ID>
@@ -128,30 +128,32 @@ struct ConsoleHostIssuesSheet<Detail: View>: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            List(issues) { issue in
-                if explained.contains(issue.hostID) {
-                    NavigationLink(value: issue.hostID) { row(issue) }
-                } else if issue.navigates {
-                    Button { onOpenHost(issue.hostID) } label: {
-                        HStack {
-                            row(issue)
-                            // Drawn as the list draws the pushing rows' own,
-                            // so every row in the sheet discloses alike, and
-                            // theirs sits this far in from the row's edge.
-                            Image(systemName: "chevron.forward")
-                                .font(.body.weight(.semibold))
-                                .imageScale(.small)
-                                .foregroundStyle(disclosureInk)
-                                .padding(.trailing, 1.5)
-                                .accessibilityHidden(true)
+            List(issues) { @Sendable issue in
+                MainActorContent {
+                    if explained.contains(issue.hostID) {
+                        NavigationLink(value: issue.hostID) { row(issue) }
+                    } else if issue.navigates {
+                        Button { onOpenHost(issue.hostID) } label: {
+                            HStack {
+                                row(issue)
+                                // Drawn as the list draws the pushing rows' own,
+                                // so every row in the sheet discloses alike, and
+                                // theirs sits this far in from the row's edge.
+                                Image(systemName: "chevron.forward")
+                                    .font(.body.weight(.semibold))
+                                    .imageScale(.small)
+                                    .foregroundStyle(disclosureInk)
+                                    .padding(.trailing, 1.5)
+                                    .accessibilityHidden(true)
+                            }
+                            .contentShape(Rectangle())
                         }
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .hoverEffect(.highlight)
+                        .accessibilityHint("Opens this Host in the Hosts tab.")
+                    } else {
+                        row(issue)
                     }
-                    .buttonStyle(.plain)
-                    .hoverEffect(.highlight)
-                    .accessibilityHint("Opens this Host in the Hosts tab.")
-                } else {
-                    row(issue)
                 }
             }
             // Rows start under the title, not a section header's gap below.

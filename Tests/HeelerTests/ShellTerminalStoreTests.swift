@@ -892,10 +892,11 @@ struct ShellTerminalStoreTests {
         timeout: Duration = .seconds(2),
         _ condition: () async -> Bool
     ) async -> Bool {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
+        var budget = PollBudget(timeout)
+        while budget.hasTimeLeft {
             if await condition() { return true }
             try? await Task.sleep(for: .milliseconds(5))
+            budget.charge()
         }
         return await condition()
     }

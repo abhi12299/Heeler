@@ -60,9 +60,12 @@ METHODS = [
     "tab.create",
     "tab.rename",
     "tab.close",
+    "pane.process_info",
     "pane.read",
     "pane.send_input",
     "pane.close",
+    "plugin.enable",
+    "plugin.list",
     "session.snapshot",
     "workspace.create",
     "workspace.rename",
@@ -85,7 +88,10 @@ EXCLUDED_PARAMS_DEFS = {
 
 # success_response ResponseResult variants (by `type` tag) the app consumes.
 # The schema does not link methods to result variants, so this list is
-# curated: it covers every result our METHODS can produce.
+# curated: it covers every result our METHODS can produce, except `plugin_list`
+# (plugin.list) and `plugin_enabled` (plugin.enable), which `PluginListResult`
+# and `PluginEnabledResult` in Transport/HeelerPluginInstallation.swift decode
+# by hand because the schema's `PopupSize` union is not generatable.
 RESULT_TAGS = [
     "pong",  # ping
     "agent_explain",  # agent.explain
@@ -93,6 +99,7 @@ RESULT_TAGS = [
     "agent_prompted",  # agent.prompt
     "agent_started",  # agent.start
     "agent_list",  # agent.list
+    "pane_process_info",  # pane.process_info
     "pane_read",  # pane.read, agent.read
     "session_snapshot",  # session.snapshot
     "subscription_started",  # events.subscribe ack

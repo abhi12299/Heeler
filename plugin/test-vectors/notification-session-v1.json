@@ -1,0 +1,333 @@
+{
+  "description": "Shared herdr session scoping v1 test vectors for Notification Registration entries (plugin/README.md, `session` field). Single source of truth consumed by both the Node plugin tests and the Swift app tests. `names` pins the session name rule shared by herdr (src/session.rs validate_name) and the app (HerdrSessionName.isValid): 1-64 bytes of ASCII letters, digits, `.`, `_` and `-`, excluding `.` and `..`. `derivation` maps a hook's HERDR_SOCKET_PATH (`socketPath` null means unset) to its session: \"\" for the default session, the name for a named session, null for an unknown shape. The named shape `/herdr/sessions/<valid name>/herdr.sock` is checked before the default suffix `/herdr/herdr.sock`. `delivery` lists registration entries and the indexes a hook in `ownSession` delivers to: entries without a string `session` are legacy and receive every session's deliveries; others only their exact session; an unknown session (null) delivers to legacy entries only. The literal name \"default\" is not special.",
+  "names": [
+    {
+      "name": "work",
+      "valid": true
+    },
+    {
+      "name": "a",
+      "valid": true
+    },
+    {
+      "name": "default",
+      "valid": true
+    },
+    {
+      "name": "herdr",
+      "valid": true
+    },
+    {
+      "name": "feature.v2_tmp-1",
+      "valid": true
+    },
+    {
+      "name": "A-Z.0_9",
+      "valid": true
+    },
+    {
+      "name": "...",
+      "valid": true
+    },
+    {
+      "name": ".hidden",
+      "valid": true
+    },
+    {
+      "name": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "valid": true
+    },
+    {
+      "name": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "valid": false
+    },
+    {
+      "name": "",
+      "valid": false
+    },
+    {
+      "name": ".",
+      "valid": false
+    },
+    {
+      "name": "..",
+      "valid": false
+    },
+    {
+      "name": "bad name",
+      "valid": false
+    },
+    {
+      "name": "a/b",
+      "valid": false
+    },
+    {
+      "name": "tab\t",
+      "valid": false
+    },
+    {
+      "name": "café",
+      "valid": false
+    },
+    {
+      "name": "ｗork",
+      "valid": false
+    },
+    {
+      "name": "semi;colon",
+      "valid": false
+    }
+  ],
+  "derivation": [
+    {
+      "name": "unset socket path is the default session",
+      "socketPath": null,
+      "session": ""
+    },
+    {
+      "name": "empty socket path is the default session",
+      "socketPath": "",
+      "session": ""
+    },
+    {
+      "name": "default session socket",
+      "socketPath": "/home/ada/.config/herdr/herdr.sock",
+      "session": ""
+    },
+    {
+      "name": "default session socket under XDG_CONFIG_HOME",
+      "socketPath": "/srv/xdg/herdr/herdr.sock",
+      "session": ""
+    },
+    {
+      "name": "named session",
+      "socketPath": "/home/ada/.config/herdr/sessions/work/herdr.sock",
+      "session": "work"
+    },
+    {
+      "name": "session named herdr is not the default",
+      "socketPath": "/home/ada/.config/herdr/sessions/herdr/herdr.sock",
+      "session": "herdr"
+    },
+    {
+      "name": "session named default is a named session",
+      "socketPath": "/home/ada/.config/herdr/sessions/default/herdr.sock",
+      "session": "default"
+    },
+    {
+      "name": "name with dot, underscore and dash",
+      "socketPath": "/home/ada/.config/herdr/sessions/feature.v2_tmp-1/herdr.sock",
+      "session": "feature.v2_tmp-1"
+    },
+    {
+      "name": "64-byte name",
+      "socketPath": "/home/ada/.config/herdr/sessions/ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss/herdr.sock",
+      "session": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+    },
+    {
+      "name": "65-byte name is unknown",
+      "socketPath": "/home/ada/.config/herdr/sessions/sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss/herdr.sock",
+      "session": null
+    },
+    {
+      "name": "name with a space is unknown",
+      "socketPath": "/home/ada/.config/herdr/sessions/bad name/herdr.sock",
+      "session": null
+    },
+    {
+      "name": "non-ASCII name is unknown",
+      "socketPath": "/home/ada/.config/herdr/sessions/café/herdr.sock",
+      "session": null
+    },
+    {
+      "name": "dot-dot name is unknown",
+      "socketPath": "/home/ada/.config/herdr/sessions/../herdr.sock",
+      "session": null
+    },
+    {
+      "name": "dot name is unknown",
+      "socketPath": "/home/ada/.config/herdr/sessions/./herdr.sock",
+      "session": null
+    },
+    {
+      "name": "nested sessions path is unknown",
+      "socketPath": "/home/ada/.config/herdr/sessions/a/b/herdr.sock",
+      "session": null
+    },
+    {
+      "name": "socket directly under sessions is unknown",
+      "socketPath": "/home/ada/.config/herdr/sessions/herdr.sock",
+      "session": null
+    },
+    {
+      "name": "herdr-dev default socket is unknown",
+      "socketPath": "/home/ada/.config/herdr-dev/herdr.sock",
+      "session": null
+    },
+    {
+      "name": "herdr-dev named socket is unknown",
+      "socketPath": "/home/ada/.config/herdr-dev/sessions/work/herdr.sock",
+      "session": null
+    },
+    {
+      "name": "custom socket override is unknown",
+      "socketPath": "/tmp/custom-herdr.sock",
+      "session": null
+    },
+    {
+      "name": "relative socket path is unknown",
+      "socketPath": "herdr.sock",
+      "session": null
+    },
+    {
+      "name": "trailing slash is unknown",
+      "socketPath": "/home/ada/.config/herdr/sessions/work/herdr.sock/",
+      "session": null
+    }
+  ],
+  "delivery": [
+    {
+      "name": "default session gets legacy and default entries",
+      "ownSession": "",
+      "entries": [
+        {},
+        {
+          "session": ""
+        },
+        {
+          "session": "work"
+        },
+        {
+          "session": "default"
+        }
+      ],
+      "delivered": [
+        0,
+        1
+      ]
+    },
+    {
+      "name": "named session gets legacy and its own entries",
+      "ownSession": "work",
+      "entries": [
+        {},
+        {
+          "session": ""
+        },
+        {
+          "session": "work"
+        },
+        {
+          "session": "default"
+        }
+      ],
+      "delivered": [
+        0,
+        2
+      ]
+    },
+    {
+      "name": "session named default is not the default session",
+      "ownSession": "default",
+      "entries": [
+        {},
+        {
+          "session": ""
+        },
+        {
+          "session": "work"
+        },
+        {
+          "session": "default"
+        }
+      ],
+      "delivered": [
+        0,
+        3
+      ]
+    },
+    {
+      "name": "unknown session gets legacy entries only",
+      "ownSession": null,
+      "entries": [
+        {},
+        {
+          "session": ""
+        },
+        {
+          "session": "work"
+        },
+        {
+          "session": "default"
+        }
+      ],
+      "delivered": [
+        0
+      ]
+    },
+    {
+      "name": "non-string session values are legacy",
+      "ownSession": "",
+      "entries": [
+        {
+          "session": null
+        },
+        {
+          "session": 7
+        },
+        {
+          "session": [
+            "work"
+          ]
+        },
+        {
+          "session": "work"
+        }
+      ],
+      "delivered": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "name": "session names compare exactly",
+      "ownSession": "work",
+      "entries": [
+        {
+          "session": "Work"
+        },
+        {
+          "session": "work "
+        },
+        {
+          "session": "work"
+        }
+      ],
+      "delivered": [
+        2
+      ]
+    },
+    {
+      "name": "session named herdr",
+      "ownSession": "herdr",
+      "entries": [
+        {
+          "session": ""
+        },
+        {
+          "session": "herdr"
+        }
+      ],
+      "delivered": [
+        1
+      ]
+    },
+    {
+      "name": "no entries",
+      "ownSession": "work",
+      "entries": [],
+      "delivered": []
+    }
+  ]
+}

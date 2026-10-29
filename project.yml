@@ -19,6 +19,12 @@ packages:
   # checked-in native artifacts. The one SSH backend (ADR 0011).
   HeelerSSH:
     path: Packages/HeelerSSH
+  # Repository-local package running Tailscale, ZeroTier, and EasyTier nodes
+  # in-process. It only dials byte streams for HeelerSSH; it never replaces
+  # the SSH backend (ADR 0021). Its native libraries come from an exact
+  # release of heeler-overlay-natives, pinned in its own Package.swift.
+  HeelerOverlay:
+    path: Packages/HeelerOverlay
   # Pin the reviewed 1.6.20260909 source commit. Its prebuilt libghostty is
   # Ghostty 82938b633ba6 with SwiftPM checksum
   # 2d9a26e80c3836c450f03ea2cf9d191841d9093d4f61c1cea466d2fc8e215dbb.
@@ -41,11 +47,15 @@ targets:
       - Sources/HeelerNotificationCore
       # Live Activity attributes + details envelope (shared with HeelerWidgets).
       - Sources/HeelerActivityCore
+      # Usage formats and the widgets' snapshot (shared with HeelerWidgets).
+      - Sources/HeelerUsageCore
       # Widget views double-included so Xcode can host their #Preview gallery
       # in the app target (plain previews are unsupported inside app-extension
-      # targets); the @main WidgetBundle stays extension-only.
+      # targets), and app tests can render the Usage widgets; the @main
+      # WidgetBundle, intents and timelines stay extension-only.
       - Sources/HeelerWidgets/AgentLiveActivityWidget.swift
       - Sources/HeelerWidgets/AgentActivityDecryptor.swift
+      - Sources/HeelerWidgets/Usage/UsageWidgetViews.swift
       # Audited third-party notices + inventory.json (#161). Folder reference
       # preserves the Notices/ subdirectory the catalogue resolves against.
       - path: Sources/Heeler/Resources/Notices
@@ -58,11 +68,26 @@ targets:
         # over the generated one; keep both versions on the build settings.
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # The commit a distributed build was made from, shown in About ›
+        # Acknowledgements (BuildSourceRevision). `make archive` and
+        # release.yml set it; other builds leave it empty.
+        HeelerSourceRevision: $(HEELER_SOURCE_REVISION)
         # A dragged Console row carries this activity; iPadOS creates a new
         # window from it only for a declared type. The generated scene
         # manifest already declares multiple-scene support.
         NSUserActivityTypes:
           - dev.bybee.heeler.agent
+        # The Usage widgets' app refresh task (AgentUsageBackgroundRefresh).
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - dev.bybee.heeler.usage-refresh
+        # `heeler://agent` links (AgentActivityLink). A Live Activity tap
+        # opens its own app without this; other apps' links need it.
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.bybee.heeler
+            CFBundleURLSchemes:
+              - heeler
     entitlements:
       path: Sources/Heeler/Heeler.entitlements
       properties:
@@ -80,16 +105,18 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.bybee.heeler
         # Home-screen name; the App Store listing is "Heeler for herdr".
         INFOPLIST_KEY_CFBundleDisplayName: Heeler
-        MARKETING_VERSION: "0.1.12"
-        CURRENT_PROJECT_VERSION: "24"
+        MARKETING_VERSION: "0.1.16"
+        CURRENT_PROJECT_VERSION: "33"
         # Scan to Pair (#62) reads the Pairing Code QR from the computer screen.
         INFOPLIST_KEY_NSCameraUsageDescription: "Heeler uses the camera to scan the Pairing Code shown on your computer, so you can add that machine without typing anything."
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Heeler uses the microphone when you tap Dictate, to turn what you say into the message you are writing."
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Heeler uses speech recognition when you tap Dictate, to turn what you say into the message you are writing."
-        # Only exempt encryption is used (standard SSH algorithms via the
-        # HeelerSSH package's libssh2/OpenSSL, OS-provided CryptoKit);
-        # declaring it here keeps every TestFlight upload from stalling on the
-        # Missing Compliance prompt.
+        # Only exempt encryption is used: standard, published algorithms in
+        # SSH (the HeelerSSH package's libssh2/OpenSSL), OS-provided
+        # CryptoKit, and the overlay networks' protocols (WireGuard in
+        # Tailscale, ZeroTier's, and EasyTier's, ADR 0021). Declaring it here
+        # keeps every TestFlight upload from stalling on the Missing
+        # Compliance prompt.
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         # iPhone and iPad. App Store Connect derives device support from the build.
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -99,8 +126,23 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         # ActivityKit starts Live Activities from the app; HeelerWidgets renders them.
         INFOPLIST_KEY_NSSupportsLiveActivities: YES
+        # In-app overlay nodes (ADR 0021) find peers on the same LAN for direct
+        # paths; iOS asks before the first local-network packet.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Heeler uses your local network to connect directly to Hosts on your Tailscale, ZeroTier, or EasyTier network when they are nearby."
+        HEELER_SOURCE_REVISION: ""
+        # The catalog holds only the app icon's pre-rendered 1024px images;
+        # space-optimized encoding stays lossless and saves ~0.46 MB per
+        # device. Decoding is the system's, at icon render time.
+        ASSETCATALOG_COMPILER_OPTIMIZATION: space
+      configs:
+        Release:
+          # Nothing loads symbols from the app executable, so its 1.52 MB
+          # export trie, mostly CEasyTier's Rust symbols, is dead weight.
+          # Release only; Debug's test host and debug dylib need it.
+          LD_EXPORT_SYMBOLS: NO
     dependencies:
       - package: HeelerSSH
+      - package: HeelerOverlay
       - package: GhosttyTerminal
       - package: GhosttyTerminal
         product: GhosttyTheme
@@ -146,8 +188,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.bybee.heeler.NotificationService
-        MARKETING_VERSION: "0.1.12"
-        CURRENT_PROJECT_VERSION: "24"
+        MARKETING_VERSION: "0.1.16"
+        CURRENT_PROJECT_VERSION: "33"
         # Match the containing app's iPhone and iPad device family.
         TARGETED_DEVICE_FAMILY: "1,2"
 
@@ -163,6 +205,8 @@ targets:
       - Sources/HeelerWidgets
       - Sources/HeelerActivityCore
       - Sources/HeelerNotificationCore
+      # Usage formats and the snapshot the app writes for the Usage widgets.
+      - Sources/HeelerUsageCore
       - Sources/Heeler/Support/Base64URL.swift
       - Sources/Heeler/Transport/SecretStore.swift
       # For AgentStatus; Foundation-only by construction (JSONValue is the
@@ -194,8 +238,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.bybee.heeler.Widgets
-        MARKETING_VERSION: "0.1.12"
-        CURRENT_PROJECT_VERSION: "24"
+        MARKETING_VERSION: "0.1.16"
+        CURRENT_PROJECT_VERSION: "33"
         # Match the containing app's iPhone and iPad device family.
         TARGETED_DEVICE_FAMILY: "1,2"
 
@@ -203,10 +247,21 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
-      - Tests/HeelerTests
+      - path: Tests/HeelerTests
+        excludes:
+          # Bundled as a folder reference below so the captured transcripts
+          # and screens keep their directory layout instead of flattening
+          # (and colliding) at the bundle root.
+          - ChatFixtures
+      - path: Tests/HeelerTests/ChatFixtures
+        type: folder
+        buildPhase: resources
       # Shared Pairing Code vectors (ADR 0007): the same file the Node plugin
       # tests consume, bundled so the Swift tests cannot drift from it.
       - path: plugin/test-vectors/pairing-code-v1.json
+        buildPhase: resources
+      # Pairing Code v2 vectors (ADR 0021): Swift-only, the Node plugin emits v1.
+      - path: plugin/test-vectors/pairing-code-v2.json
         buildPhase: resources
       # Shared notification envelope vectors (ADR 0008), same arrangement.
       - path: plugin/test-vectors/notification-payload-v1.json
@@ -217,6 +272,15 @@ targets:
       # Shared sidebar layout snapshot vectors, consumed by Node and Swift.
       - path: plugin/test-vectors/sidebar-layout-v1.json
         buildPhase: resources
+      # Shared notification session vectors (#412), consumed by Node and Swift.
+      - path: plugin/test-vectors/notification-session-v1.json
+        buildPhase: resources
+      # Shared usage response produced by Node and decoded by Swift.
+      - path: plugin/test-vectors/usage-v1.json
+        buildPhase: resources
+      # Shared plugin version vector: the release the app recommends.
+      - path: plugin/test-vectors/plugin-version-v1.json
+        buildPhase: resources
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -224,6 +288,7 @@ targets:
     dependencies:
       - target: Heeler
       - package: HeelerSSH
+      - package: HeelerOverlay
       - package: GhosttyTerminal
 
 schemes:

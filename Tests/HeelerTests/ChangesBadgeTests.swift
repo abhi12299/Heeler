@@ -105,6 +105,27 @@ struct ChangesBadgeTests {
         #expect(!removals.showsAdded && removals.showsRemoved)
     }
 
+    /// SwiftUI can build the file-count cells on its async render thread, as
+    /// it did in #471. A cell closure isolated to the main actor traps there,
+    /// so a regression crashes this test rather than failing it.
+    @Test func buildsFileCountsOffTheMainThread() async throws {
+        let badge = try #require(Self.badge(TideGitItemTests.changes(files: [
+            TideGitItemTests.file("app.swift", staging: .unstaged),
+            TideGitItemTests.file("notes/", kind: .untracked, staging: nil),
+        ], untracked: 1)))
+        try #require(badge.showsFiles)
+        let totals = ChangesRowTotals(source: .sample(badge))
+        for style in ChangesBadge.Style.allCases {
+            let cell = UncheckedSendable(value: totals.fileCounts(badge, style: style).content)
+            let counts = badge.fileCounts
+            await Task.detached {
+                for count in counts {
+                    _ = cell.value(count)
+                }
+            }.value
+        }
+    }
+
     @Test func aTruncatedCountReadsAsALowerBound() throws {
         var changes = try Self.read(added: 12, removed: 7).changes
         changes.totals.linesAreComplete = false
@@ -1418,6 +1439,24 @@ struct AgentCardChangesTotalsTests {
         #expect(Self.identifier(of: element) == "agent-row-changes.exact")
     }
 
+    /// SwiftUI can build the card's rows on its async render thread, as it
+    /// built the file counts in #471. A row closure isolated to the main
+    /// actor traps there, so a regression crashes this test.
+    @Test func buildsAdditionalRowsOffTheMainThread() async throws {
+        let card = AgentCardView(agent: Self.agent, layout: .consoleDefault)
+        let rows = Array(
+            AgentCardPresentation(agent: Self.agent, layout: .consoleDefault).rows.dropFirst())
+        try #require(rows.count > 1)
+        let forEach = card.additionalRowViews(rows)
+        let row = UncheckedSendable(value: forEach.content)
+        let elements = Array(rows.enumerated())
+        await Task.detached {
+            for element in elements {
+                _ = row.value(element)
+            }
+        }.value
+    }
+
     /// With more rows, the Host ends the first one after Row 1 and the
     /// totals end the last.
     @Test func theHostEndsTheFirstDetailLineAndTheTotalsTheLast() async throws {
@@ -1478,4 +1517,10 @@ struct AgentCardChangesTotalsTests {
             #expect(labels.contains("devbox"))
         }
     }
+}
+
+/// Hands a closure SwiftUI never marks Sendable to another thread, as
+/// SwiftUI's async renderer does.
+private struct UncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
 }

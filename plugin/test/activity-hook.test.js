@@ -533,3 +533,86 @@ suite("activity-hook: registered Agent List Fields", () => {
     assert.deepEqual(contents[3].agents, []);
   });
 });
+
+suite("activity-hook: herdr sessions", () => {
+  const DEFAULT_SOCKET = "/home/ada/.config/herdr/herdr.sock";
+  const socketFor = (session) => `/home/ada/.config/herdr/sessions/${session}/herdr.sock`;
+
+  test("a hook delivers to legacy entries and entries of its own session only", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([
+      device(),
+      device({ token: "b".repeat(64), key: KEY_B, activityToken: ACTIVITY_TOKEN_B, session: "" }),
+      device({ token: "e".repeat(64), activityToken: "f".repeat(64), session: "work" }),
+    ]);
+    writeHerdrStub([listedAgent()]);
+
+    const result = await runHook(statusEvent("working"), {
+      env: { HERDR_SOCKET_PATH: socketFor("work") },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(
+      relay.requests.map((request) => request.body.token).sort(),
+      [ACTIVITY_TOKEN_A, "f".repeat(64)],
+    );
+  });
+
+  test("a session without its own entries makes no herdr calls", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([device({ session: "work" })]);
+    writeHerdrStub([listedAgent()]);
+
+    const result = await runHook(statusEvent("working"), {
+      env: { HERDR_SOCKET_PATH: DEFAULT_SOCKET },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(relay.requests.length, 0);
+    assert.equal(stubInvocations().length, 0);
+    assert.equal(existsSync(join(stateDir, "activity", "claim.json")), false);
+  });
+
+  test("overlapping claims of two sessions do not supersede each other", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([device()]);
+    writeHerdrStub([listedAgent()]);
+
+    const [first, second] = await Promise.all([
+      runHook(statusEvent("working"), { env: { HERDR_SOCKET_PATH: DEFAULT_SOCKET } }),
+      runHook(statusEvent("working"), { env: { HERDR_SOCKET_PATH: socketFor("work") } }),
+    ]);
+
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(relay.requests.length, 2);
+    // The default session keeps the pre-session state path; named sessions nest.
+    assert.ok(existsSync(join(stateDir, "activity", "last-state.json")));
+    assert.ok(existsSync(join(stateDir, "sessions", "work", "activity", "last-state.json")));
+  });
+
+  test("one session's ended state does not cheap-exit another session", async () => {
+    await startFakeRelay();
+    writeConfig();
+    writeRegistration([device()]);
+    writeLastState({ sent_at_ms: 1, statuses: {}, ended: true });
+    writeHerdrStub([listedAgent({ status: "idle", title: null })]);
+
+    const ended = await runHook(statusEvent("idle"), {
+      env: { HERDR_SOCKET_PATH: DEFAULT_SOCKET },
+    });
+    assert.equal(ended.status, 0, ended.stderr);
+    assert.equal(stubInvocations().length, 0);
+
+    const other = await runHook(statusEvent("idle"), {
+      env: { HERDR_SOCKET_PATH: socketFor("work") },
+    });
+    assert.equal(other.status, 0, other.stderr);
+    assert.deepEqual(stubInvocations().map((entry) => entry.args), [["agent", "list"]]);
+    assert.equal(relay.requests.length, 1);
+    assert.equal(relay.requests[0].body.event, "end");
+  });
+});

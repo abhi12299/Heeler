@@ -201,7 +201,7 @@ final class AgentListFieldsEditor {
             drafts[hostID] = snapshot.layout.withHeelerRow(thirdRow)
             syncStates[hostID] = .filled(snapshot.diagnostics.isEmpty
                 ? "Replaced with plugin fields."
-                : "herdr reported a configuration problem, so its default fields were used.")
+                : AgentListFieldsCopy.syncDiagnostics)
         case .loaded(nil):
             drafts[hostID] = AgentRowLayout.heelerDefault.withHeelerRow(thirdRow)
             syncStates[hostID] = .filled(

@@ -40,6 +40,12 @@ struct TerminalStatusPresentation: Equatable {
         message: nil,
         dimsBackground: false)
 
+    static let reconnecting = TerminalStatusPresentation(
+        kind: .connecting,
+        title: "Reconnecting…",
+        message: nil,
+        dimsBackground: false)
+
     static func ended(message: String) -> TerminalStatusPresentation {
         TerminalStatusPresentation(
             kind: .ended,
@@ -52,6 +58,8 @@ struct TerminalStatusPresentation: Equatable {
         switch status {
         case .waitingForSize, .connecting:
             self = .connecting
+        case .reconnecting:
+            self = .reconnecting
         case .ended(let message):
             self = .ended(message: message)
         case .live, .stopped:
@@ -103,7 +111,7 @@ struct TerminalStatusDialog<Actions: View>: View {
                 case .progress:
                     ProgressView()
                         .controlSize(.large)
-                        .tint(palette.accent)
+                        .tint(palette.foreground.opacity(0.7))
                 }
                 Text(title)
                     .font(.headline)
@@ -114,9 +122,13 @@ struct TerminalStatusDialog<Actions: View>: View {
                         .foregroundStyle(palette.foreground.opacity(0.7))
                         .multilineTextAlignment(.center)
                 }
-                actions()
-                    .tint(palette.accent)
-                    .padding(.top, 4)
+                if Actions.self != EmptyView.self {
+                    // One column as wide as its widest button.
+                    VStack(spacing: 8) { actions() }
+                        .fixedSize(horizontal: true, vertical: false)
+                        .environment(\.terminalStatusPalette, palette)
+                        .padding(.top, 4)
+                }
             }
             .padding(24)
             .frame(maxWidth: 320)
@@ -137,6 +149,57 @@ struct TerminalStatusDialog<Actions: View>: View {
     private var cardBackground: Color {
         palette.background.mix(with: palette.foreground, by: 0.08)
     }
+}
+
+/// A `TerminalStatusDialog` button, drawn in the terminal's two base
+/// colours. The theme's accent is an ANSI slot, often a pastel in dark
+/// themes (Vesper's blue is a light lavender), and the system's white label
+/// on it was barely legible; foreground and background contrast by design.
+struct TerminalStatusButtonStyle: ButtonStyle {
+    enum Prominence {
+        /// Foreground fill, background label: the action the dialog suggests.
+        case primary
+        /// A faint foreground fill: the way out.
+        case secondary
+    }
+
+    let prominence: Prominence
+
+    func makeBody(configuration: Configuration) -> some View {
+        StyledLabel(prominence: prominence, configuration: configuration)
+    }
+
+    private struct StyledLabel: View {
+        let prominence: Prominence
+        let configuration: Configuration
+        @Environment(\.terminalStatusPalette) private var palette
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(prominence == .primary ? .body.weight(.semibold) : .body)
+                .foregroundStyle(prominence == .primary ? palette.background : palette.foreground)
+                .padding(.horizontal, 20)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(fill, in: .capsule)
+                .contentShape(.capsule)
+                .opacity(isEnabled ? (configuration.isPressed ? 0.7 : 1) : 0.4)
+        }
+
+        private var fill: Color {
+            prominence == .primary ? palette.foreground : palette.foreground.opacity(0.12)
+        }
+    }
+}
+
+extension ButtonStyle where Self == TerminalStatusButtonStyle {
+    static var terminalStatusPrimary: Self { .init(prominence: .primary) }
+    static var terminalStatusSecondary: Self { .init(prominence: .secondary) }
+}
+
+extension EnvironmentValues {
+    /// The palette `TerminalStatusButtonStyle` draws in, set by the dialog.
+    @Entry var terminalStatusPalette: TerminalThemePalette = .system
 }
 
 extension TerminalStatusDialog where Actions == EmptyView {
@@ -164,7 +227,7 @@ extension TerminalStatusDialog where Actions == EmptyView {
             palette: palette
         ) {
             Button("Reattach") {}
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.terminalStatusPrimary)
         }
     }
 }

@@ -339,7 +339,8 @@ struct AgentListFieldsEditorTests {
         #expect(editor.layout(for: hostID).rows[0][0].bold == false)
         #expect(editor.layout(for: hostID).rows[0][0].dim == true)
         #expect(editor.syncStates[hostID] == .filled(
-            "herdr reported a configuration problem, so its default fields were used."))
+            "The Heeler plugin couldn't read this Host's herdr sidebar settings, so herdr's "
+                + "default fields were used. Update the plugin, or run herdr config check."))
         #expect(layouts.hostLayouts.isEmpty)
 
         fetchState.value = .loaded(AgentRowLayoutSnapshot(layout: snapshot.layout))

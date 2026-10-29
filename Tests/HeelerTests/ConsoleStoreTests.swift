@@ -117,6 +117,371 @@ struct ConsoleStoreTests {
         #expect(await condition(), comment)
     }
 
+    @Test func removingAHostDropsItsChatCache() async throws {
+        let cache = VolatileChatTranscriptCache()
+        let kept = Host.fixture()
+        let removed = Host.fixture()
+        let store = ConsoleStore(snapshotRetryDelay: .milliseconds(10), chatCache: cache) {
+            _, subscriptions in
+            EventsSession(
+                subscriptions: subscriptions,
+                connect: { throw TransportError.sshUnreachable(detail: "unscripted host") },
+                keepalive: nil)
+        }
+        func key(_ host: Host) -> ChatCacheKey {
+            ChatCacheKey(
+                hostID: host.id, herdrSession: "", program: .codex,
+                conversationID: "01a10f87-e025-7fb1-8974-8dd09937767a")
+        }
+        for host in [kept, removed] {
+            await cache.save(
+                ChatCacheDocument(
+                    key: key(host), adapterRevision: 1, transcriptPath: "/r.jsonl", head: Data(),
+                    coverageStart: 0, coverageEnd: 0, reachedStart: true, title: nil, entries: [],
+                    savedAt: Date()))
+        }
+
+        store.setHosts([kept, removed])
+        store.setHosts([kept])
+
+        try await waitUntil("the removed Host's Chat cache is deleted") {
+            await cache.load(key(removed)) == .miss
+        }
+        #expect(await cache.load(key(kept)) != .miss)
+        store.setHosts([])
+    }
+
+    /// A new Claude Code, Pi or Oh My Pi conversation has no file until its
+    /// first turn, whose status change prefetches again: looking every few
+    /// seconds in between would find nothing.
+    @Test func awaitingFirstMessageDoesNotRetryPrefetch() {
+        #expect(!ConsoleStore.chatPrefetchWaits(on: .unavailable(.awaitingFirstMessage(.claude))))
+        #expect(!ConsoleStore.chatPrefetchWaits(on: .unavailable(.awaitingFirstMessage(.pi))))
+        #expect(!ConsoleStore.chatPrefetchWaits(on: .unavailable(.awaitingFirstMessage(.omp))))
+        #expect(ConsoleStore.chatPrefetchWaits(on: .unavailable(.notFound(searchedAll: true))))
+        #expect(ConsoleStore.chatPrefetchWaits(on: .unavailable(.noSession(.pi))))
+        #expect(ConsoleStore.chatPrefetchWaits(on: .locating))
+        #expect(!ConsoleStore.chatPrefetchWaits(on: .following(path: "/p.jsonl")))
+    }
+
+    /// A conversation still missing after a few looks waits for a change
+    /// to its Agent instead of sweeping the Host every few seconds while
+    /// its Chat is hidden (SR-02).
+    @Test(arguments: [
+        ChatConversationSnapshot.Phase.unavailable(.notFound(searchedAll: true)), .unavailable(.noSession(.claude)),
+    ])
+    func aMissingConversationStopsPrefetchingAfterThreeRetries(phase: ChatConversationSnapshot.Phase) {
+        #expect((0...4).map { ConsoleStore.chatPrefetchRetries(after: $0, phase: phase) }
+            == [true, true, true, false, false])
+        #expect(!ConsoleStore.chatPrefetchRetries(after: 0, phase: .following(path: "/p.jsonl")))
+    }
+
+    @Test func aStatusChangeRearmsAStoppedPrefetch() async throws {
+        let host = Host.fixture()
+        let session = AgentSessionInfo(
+            agent: "claude", kind: .id, source: "herdr:claude", value: "e951205e-24af-4a5e-baa7-3ccbebd2de2c")
+        let info = AgentInfo(
+            agentStatus: .idle, focused: false, paneID: "w1:p1", revision: 1,
+            tabID: "t1", terminalID: "term-1", workspaceID: "w1", agent: "claude",
+            agentSession: session, cwd: "/home/dev/proj")
+        let transport = ScriptedTransport(snapshot: .fixture(agents: [info]))
+        // No transcript under the session's name.
+        await transport.scriptChat(files: VirtualHostFiles().hostFiles(), agent: Agent(info))
+        let store = ConsoleStore(
+            snapshotRetryDelay: .milliseconds(10), chatPrefetchRetryDelay: .milliseconds(10),
+            makeSession: { _, subscriptions in
+                EventsSession(
+                    subscriptions: subscriptions, connect: { transport },
+                    reconnectPolicy: Self.fastPolicy, keepalive: nil)
+            }, chatAdapter: { _ in NumberedChatReducer.adapter() })
+        defer { store.setHosts([]) }
+
+        store.setHosts([host])
+        await store.resume()
+        try await waitUntil("the first look and three retries") { await transport.chatAgentReads.count == 4 }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(await transport.chatAgentReads.count == 4)
+
+        await transport.setSnapshot(.fixture(agents: [AgentInfo(
+            agentStatus: .working, focused: false, paneID: "w1:p1", revision: 2,
+            tabID: "t1", terminalID: "term-1", workspaceID: "w1", agent: "claude",
+            agentSession: session, cwd: "/home/dev/proj")]))
+        try await waitUntil("the status event lands") {
+            _ = await transport.emit(.agentStatusChanged(paneID: "w1:p1", status: .working))
+            return store.agents.first?.agent.status == .working
+        }
+        try await waitUntil("the new status looks again") { await transport.chatAgentReads.count == 8 }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(await transport.chatAgentReads.count == 8)
+    }
+
+    @Test func connectingCachesChatWithoutOpeningItsDetail() async throws {
+        let host = Host.fixture()
+        let sessionID = "e951205e-24af-4a5e-baa7-3ccbebd2de2c"
+        let session = AgentSessionInfo(
+            agent: "claude", kind: .id, source: "herdr:claude", value: sessionID)
+        let info = AgentInfo(
+            agentStatus: .idle, focused: false, paneID: "w1:p1", revision: 1,
+            tabID: "t1", terminalID: "term-1", workspaceID: "w1", agent: "claude",
+            agentSession: session, cwd: "/home/dev/proj")
+        let transport = ScriptedTransport(snapshot: .fixture(agents: [info]))
+        let files = VirtualHostFiles()
+        let path = "/home/dev/.claude/projects/-home-dev-proj/\(sessionID).jsonl"
+        await files.write(NumberedChatReducer.lines(0..<3), at: path)
+        await transport.scriptChat(files: files.hostFiles(), agent: Agent(info))
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "ConsoleChatPrefetch-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FileChatTranscriptCache(root: root)
+        let store = ConsoleStore(
+            snapshotRetryDelay: .milliseconds(10), chatCache: cache,
+            makeSession: { _, subscriptions in
+                EventsSession(
+                    subscriptions: subscriptions, connect: { transport },
+                    reconnectPolicy: Self.fastPolicy, keepalive: nil)
+            }, chatAdapter: { _ in NumberedChatReducer.adapter() })
+        let key = ChatCacheKey(
+            hostID: host.id, socketLocation: host.socketLocation,
+            reference: ConversationReference(program: .claude, sessionID: sessionID))
+
+        store.setHosts([host])
+        await store.resume()
+        // No detail, chatStore, show or prefetch call: connecting owns this work.
+        try await waitUntil("connecting should persist the unread Chat conversation") {
+            guard case .hit(let document) = await cache.load(key) else { return false }
+            return document.entries.map(\.id.rawValue) == NumberedChatReducer.ids(0..<3)
+        }
+        #expect(store.hostPlatforms[host.id] == .posix)
+        #expect(!store.hostsAwaitingSnapshot.contains(host.id))
+        #expect(await transport.chatAgentReads.count > 0)
+        #expect(await files.reads.contains { $0.path == path })
+        await store.cachedChats.settled()
+        await store.suspend()
+
+        // A new cache actor proves both the page and its entry point were
+        // written to disk, rather than retained only in the first store.
+        let reopened = FileChatTranscriptCache(root: root)
+        guard case .hit(let document) = await reopened.load(key) else {
+            Issue.record("the prefetched conversation should survive relaunch")
+            store.setHosts([])
+            return
+        }
+        #expect(document.entries.map(\.id.rawValue) == NumberedChatReducer.ids(0..<3))
+        let directory = await reopened.loadAgentDirectory(for: host)
+        #expect(directory.map(\.paneID) == ["w1:p1"])
+        #expect(directory.first?.agentSession == session)
+        store.setHosts([])
+    }
+
+    /// Each read of a conversation an adapter reads by query is an exec on
+    /// the Host, and the prefetch key changes with every status: only an
+    /// open Chat reads it (ADR 0025).
+    @Test func openCodeAgentsAreNotPrefetched() async throws {
+        let host = Host.fixture()
+        let claudeSession = "e951205e-24af-4a5e-baa7-3ccbebd2de2c"
+        let openCodeSession = "ses_0a1b2c3d4e5fK2mN8pQ4rT6vX9"
+        let claude = AgentInfo(
+            agentStatus: .idle, focused: false, paneID: "w1:p1", revision: 1,
+            tabID: "t1", terminalID: "term-1", workspaceID: "w1", agent: "claude",
+            agentSession: AgentSessionInfo(agent: "claude", kind: .id, source: "herdr:claude", value: claudeSession),
+            cwd: "/home/dev/proj")
+        let openCode = AgentInfo(
+            agentStatus: .idle, focused: false, paneID: "w1:p2", revision: 1,
+            tabID: "t1", terminalID: "term-2", workspaceID: "w1", agent: "opencode",
+            agentSession: AgentSessionInfo(
+                agent: "opencode", kind: .id, source: "herdr:opencode", value: openCodeSession),
+            cwd: "/home/dev/proj")
+        let transport = ScriptedTransport(snapshot: .fixture(agents: [claude, openCode]))
+        let files = VirtualHostFiles()
+        await files.write(
+            NumberedChatReducer.lines(0..<3),
+            at: "/home/dev/.claude/projects/-home-dev-proj/\(claudeSession).jsonl")
+        await transport.scriptChat(files: files.hostFiles(), agent: Agent(claude))
+        let records = InMemoryRecordSource.Store()
+        await records.write(NumberedChatReducer.lines(0..<3))
+        let cache = VolatileChatTranscriptCache()
+        let store = ConsoleStore(
+            snapshotRetryDelay: .milliseconds(10), chatPrefetchRetryDelay: .milliseconds(10), chatCache: cache,
+            makeSession: { _, subscriptions in
+                EventsSession(
+                    subscriptions: subscriptions, connect: { transport },
+                    reconnectPolicy: Self.fastPolicy, keepalive: nil)
+            },
+            chatAdapter: { program in
+                program == .opencode
+                    ? InMemoryRecordSource.adapter(records, sessionID: openCodeSession) : NumberedChatReducer.adapter()
+            })
+        defer { store.setHosts([]) }
+        let claudeKey = ChatCacheKey(
+            hostID: host.id, socketLocation: host.socketLocation,
+            reference: ConversationReference(program: .claude, sessionID: claudeSession))
+
+        store.setHosts([host])
+        await store.resume()
+        try await waitUntil("the Claude Code conversation is prefetched") {
+            guard case .hit(let document) = await cache.load(claudeKey) else { return false }
+            return document.entries.map(\.id.rawValue) == NumberedChatReducer.ids(0..<3)
+        }
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(Set(await transport.chatAgentReads.map(\.target)) == ["w1:p1"])
+        #expect(await records.calls.isEmpty)
+        let agent = try #require(store.agents.first(where: { $0.agent.paneID == "w1:p2" }))
+        #expect(store.chatProgram(for: agent) == .opencode)
+    }
+
+    /// Chat's availability asks the adapters the store reads with: a program
+    /// it has none for is not offered, and its Agents never ask for the
+    /// Host's platform.
+    @Test func aProgramTheStoreHasNoAdapterForIsNotOffered() async throws {
+        let host = Host.fixture()
+        let info = AgentInfo(
+            agentStatus: .idle, focused: false, paneID: "w1:p1", revision: 1,
+            tabID: "t1", terminalID: "term-1", workspaceID: "w1", agent: "claude",
+            agentSession: AgentSessionInfo(
+                agent: "claude", kind: .id, source: "herdr:claude", value: "e951205e-24af-4a5e-baa7-3ccbebd2de2c"),
+            cwd: "/home/dev/proj")
+        let transport = ScriptedTransport(snapshot: .fixture(agents: [info]))
+        let store = ConsoleStore(
+            snapshotRetryDelay: .milliseconds(10),
+            makeSession: { _, subscriptions in
+                EventsSession(
+                    subscriptions: subscriptions, connect: { transport },
+                    reconnectPolicy: Self.fastPolicy, keepalive: nil)
+            }, chatAdapter: { $0 == .claude ? nil : NumberedChatReducer.adapter() })
+        defer { store.setHosts([]) }
+
+        store.setHosts([host])
+        await store.resume()
+        try await waitUntil("the Claude Code Agent is listed") { store.agents.count == 1 }
+        let agent = try #require(store.agents.first)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(store.hostPlatforms[host.id] == nil, "no Agent on the Host may offer Chat")
+        #expect(store.chatProgram(for: agent) == nil)
+
+        await store.resolveHostPlatform(host.id)
+        #expect(store.hostPlatforms[host.id] == .posix)
+        #expect(store.chatProgram(for: agent) == nil)
+        #expect(await transport.chatAgentReads.isEmpty, "nor is it prefetched")
+    }
+
+    /// The user can trust a replaced host key without editing the Host; the
+    /// reconnect that follows must not hand the old machine's saved Chat
+    /// binding to a live Agent that has not reported its session.
+    @Test func reconnectingAfterAReplacedHostKeyDropsSavedChatBindings() async throws {
+        let host = Host.fixture()
+        let info = AgentInfo(
+            agentStatus: .idle, focused: false, paneID: "w1:p1", revision: 1,
+            tabID: "t1", terminalID: "term-1", workspaceID: "w1", agent: "claude",
+            agentSession: nil, cwd: "/home/dev/proj")
+        let savedSession = AgentSessionInfo(
+            agent: "claude", kind: .id, source: "herdr:claude",
+            value: "e951205e-24af-4a5e-baa7-3ccbebd2de2c")
+        let saved = Agent(AgentInfo(
+            agentStatus: .idle, focused: false, paneID: "w1:p1", revision: 1,
+            tabID: "t1", terminalID: "term-1", workspaceID: "w1", agent: "claude",
+            agentSession: savedSession, cwd: "/home/dev/proj"))
+        let knownHosts = InMemoryKnownHostsStore()
+        let trust = HostKeyTrust.hostKey(host.id)
+        func trustKey(_ byte: UInt8) async {
+            await knownHosts.setFingerprint(
+                HostKeyFingerprint(digest: Data(repeating: byte, count: 32), algorithm: "ssh-ed25519"),
+                host: trust.host, port: trust.port)
+        }
+        await trustKey(1)
+        let cache = VolatileChatTranscriptCache(knownHosts: knownHosts)
+        await cache.saveAgentDirectory(
+            [ChatCachedAgent(ConsoleAgent(
+                hostID: host.id, hostName: host.displayName, agent: saved,
+                workspaceLabel: nil, repositoryCheckout: nil))],
+            for: host)
+        let transport = ScriptedTransport(snapshot: .fixture(agents: [info]))
+        let store = ConsoleStore(
+            snapshotRetryDelay: .milliseconds(10), chatCache: cache,
+            makeSession: { _, subscriptions in
+                EventsSession(
+                    subscriptions: subscriptions, connect: { transport },
+                    reconnectPolicy: Self.fastPolicy, keepalive: nil)
+            })
+        defer { store.setHosts([]) }
+        let live = Agent(info)
+
+        store.setHosts([host])
+        await store.resume()
+        try await waitUntil("the first connection should keep the saved binding") {
+            await store.cachedChats.settled()
+            return await store.cachedChats.cachedSession(for: live, on: host) == savedSession
+        }
+
+        await trustKey(2)
+        await transport.failEventStream(.channelFailed(detail: "scripted reconnect"))
+        try await waitUntil("the reconnect should drop the other machine's binding") {
+            await store.cachedChats.settled()
+            guard store.hostStatuses[host.id] == .connected else { return false }
+            return await store.cachedChats.cachedSession(for: live, on: host) == nil
+        }
+        #expect(await cache.loadAgentDirectory(for: host).isEmpty)
+    }
+
+    /// #414, the app's removal wiring end to end: the revoke borrows the
+    /// Host's live Console connection, which the catalog change then ends,
+    /// so a revoke attempted after it could no longer reach the Host.
+    @Test func hostRemovalRevokesOverTheConnectionTheCatalogChangeEnds() async throws {
+        let host = Host.fixture()
+        let transport = ScriptedTransport(snapshot: .fixture(agents: []))
+        let console = makeStore(transports: [host.id: transport])
+        defer { console.setHosts([]) }
+        let (defaults, cleanup) = try makePinDefaults()
+        defer { cleanup() }
+        let hostStore = HostStore(defaults: defaults, secrets: InMemorySecretStore())
+        try hostStore.add(host)
+        let token = APNSDeviceToken(hex: "0a1b2c3d", environment: .sandbox)
+        let keys = NotificationKeyStore(secrets: InMemorySecretStore(), mirror: nil)
+        let ceremony = NotificationRegistrationCeremony(keys: keys)
+        let preferences = NotificationPreferencesStore(
+            transports: console, deviceToken: { token }, ceremony: ceremony)
+        preferences.setHosts(hostStore.hosts)
+        let liveActivities = HostLiveActivityCoordinator(
+            controller: FakeLiveActivityController(),
+            preferences: LiveActivityPreferences(defaults: defaults),
+            transports: console,
+            keys: keys,
+            deviceToken: { token },
+            knownHostIDs: { Set(hostStore.hosts.map(\.id)) },
+            hostDisplayName: { _ in host.displayName },
+            isAwaitingSnapshot: { _ in false },
+            connectionStatus: { console.hostStatuses[$0] })
+        console.setHosts(hostStore.hosts)
+        await console.resume()
+        try await waitUntil("the Host should connect") {
+            console.hostStatuses[host.id] == .connected
+        }
+        try await ceremony.register(host: host, deviceToken: token, over: transport)
+        let dependencies = HostRemovalDependencies.app(
+            console: console, notificationPreferences: preferences,
+            liveActivities: liveActivities)
+        let removal = HostRemovalStore(store: hostStore)
+
+        removal.requestRemoval([host.id], dependencies: dependencies)
+        let request = try #require(removal.pendingRequest)
+        #expect(request.deletesNotificationKey)
+        #expect(!request.leavesNotificationsBehind)
+        await removal.confirmRemoval(request, dependencies: dependencies)
+
+        #expect(hostStore.hosts.isEmpty)
+        #expect(removal.errorMessage == nil)
+        #expect(try keys.record(forHost: host.id) == nil)
+        let file = try NotificationRegistrationFile.decode(
+            await transport.notificationRegistration)
+        #expect(file.devices.isEmpty)
+
+        // What the app model's catalog observer does next.
+        console.setHosts(hostStore.hosts)
+        await #expect(throws: (any Error).self) {
+            try await console.withNotificationTransport(for: host.id) { _ in () }
+        }
+    }
+
     @Test func sortBucketsRankBlockedThenDoneThenWorkingThenIdle() {
         #expect(AgentStatus.blocked.consoleSortBucket < AgentStatus.done.consoleSortBucket)
         #expect(AgentStatus.done.consoleSortBucket < AgentStatus.working.consoleSortBucket)
@@ -1733,6 +2098,30 @@ struct ConsoleStoreTests {
         #expect(store.hostLatencies.isEmpty)
     }
 
+    /// The route a Host reached (ADR 0022) is published with `.connected`
+    /// and dropped with the connection, like its latency.
+    @Test func hostRouteIDFollowsTheConnectionThatReachedIt() async throws {
+        let host = Host.fixture()
+        let routeID = try #require(host.routes.first?.id)
+        let transport = ScriptedTransport(snapshot: .fixture(), routeID: routeID)
+        let store = makeStore(transports: [host.id: transport])
+
+        store.setHosts([host])
+        await store.resume()
+        try await waitUntil("the Host should report connected") {
+            store.hostStatuses[host.id] == .connected
+        }
+        #expect(store.hostRouteIDs[host.id] == routeID)
+
+        await store.suspend()
+        try await waitUntil("the Host should report suspended") {
+            store.hostStatuses[host.id] == .suspended
+        }
+        #expect(store.hostRouteIDs[host.id] == nil)
+
+        store.setHosts([])
+    }
+
     /// A latency belongs to the connection that measured it (#236), and the
     /// projection folds both from one ordered source — so every assertion here
     /// is made the instant the status is observable, with nothing waited for
@@ -2230,7 +2619,10 @@ struct ConsoleStoreTests {
         let checkout = try #require(agent.repositoryCheckout)
 
         await transport.setWorktreeRemoveFailure(
-            HerdrAPIError(code: "dirty_worktree_requires_force", message: "dirty"))
+            HerdrAPIError(
+                code: "dirty_worktree_requires_force",
+                message:
+                    "fatal: '/work/one-wt' contains modified or untracked files, use --force to delete it"))
         let rejected = WorktreeRemovalRequest(
             identity: WorktreeIdentity(
                 hostID: host.id, workspaceID: "w1", checkout: checkout))

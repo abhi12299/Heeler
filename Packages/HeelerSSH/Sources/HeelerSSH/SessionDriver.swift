@@ -202,6 +202,8 @@ actor SessionDriver {
     private var nextExecStdoutOwnerErrorForTesting: SSHError?
     private var nextExchangeStderrOwnerForTesting: Bool?
     private var nextExchangeOwnedReadHoldForTesting: (@Sendable () async -> Void)?
+    private var nextExchangeStderrReadWaitsForInboundForTesting = false
+    private var nextExecStdoutReadWaitsForInboundForTesting = false
     private var nextStreamLocalTimeoutHookForTesting: (@Sendable () async throws -> Void)?
     private var nextExecChannelAllocatedHoldForTesting: (@Sendable () async throws -> Void)?
     private var nextExecCleanupHoldForTesting: (@Sendable () async throws -> Void)?
@@ -260,10 +262,11 @@ actor SessionDriver {
     func handshake(
         transport: any SSHByteTransport,
         endpoint: SSHEndpoint,
-        timeout: Duration
+        timeout: Duration,
+        transportLabel: String = "the Jump Host transport"
     ) async throws -> SSHHostKey {
         try await withDiagnosticPhase(
-            "handshake with \(endpoint.host):\(endpoint.port) over the Jump Host transport"
+            "handshake with \(endpoint.host):\(endpoint.port) over \(transportLabel)"
         ) {
             await acquireOperation()
             defer { releaseOperation() }
@@ -861,6 +864,7 @@ actor SessionDriver {
                     madeProgress: Bool, wait: SessionWaitPlan)
                 do {
                     try checkProgress(deadline: deadline)
+                    let roundWatch = activity.watch()
                     _ = try resolveChannel(.pty(id))
                     if let pending = takePendingExecOutput(id: id, maximumBytes: maximumBytes) {
                         releaseOperation()
@@ -904,6 +908,12 @@ actor SessionDriver {
                                 transportSendOwner = stdoutOwner
                                 throw error
                             }
+                            if nextExecStdoutReadWaitsForInboundForTesting, !madeProgress {
+                                nextExecStdoutReadWaitsForInboundForTesting = false
+                                // Outlast the command, so its whole reply has
+                                // reached the socket before this read.
+                                usleep(600_000)
+                            }
                             #endif
                             var buffer = [UInt8](repeating: 0, count: maximumBytes)
                             output = try readAvailableNoting(
@@ -920,7 +930,7 @@ actor SessionDriver {
                         || transportSendOwner == stderrOwner
                     progress = (
                         output, eof, pendingSend, madeProgress,
-                        sessionWaitPlan(try requireSession()))
+                        sessionWaitPlan(try requireSession(), watching: roundWatch))
                     releaseOperation()
                 } catch {
                     await finishExecReadsIfNeeded(
@@ -1922,6 +1932,220 @@ actor SessionDriver {
         }
     }
 
+    /// Stats one path: STAT follows a symlink, LSTAT reports the link itself.
+    /// A missing path (`NO_SUCH_FILE` or `NO_SUCH_PATH`) is the expected nil
+    /// case; every other SFTP status surfaces as a path-free
+    /// `SSHError.sftpFailure`.
+    func sftpFileStatus(
+        id: UInt64,
+        path: String,
+        followSymlinks: Bool,
+        timeout: Duration
+    ) async throws -> SSHSFTPFileStatus? {
+        try await withDiagnosticPhase("SFTP file status") {
+            guard Self.isValidSFTPPath(path) else { throw SSHError.channelFailed }
+            await acquireOperation()
+            defer { releaseOperation() }
+            var attributes = LIBSSH2_SFTP_ATTRIBUTES()
+            let statType = Int32(followSymlinks ? LIBSSH2_SFTP_STAT : LIBSSH2_SFTP_LSTAT)
+            let result = try await repeatUntilCompleteHoldingSFTP(
+                id: id,
+                deadline: ContinuousClock.now.advanced(by: timeout)
+            ) { sftp in
+                path.withCString { pathPointer in
+                    libssh2_sftp_stat_ex(
+                        sftp,
+                        pathPointer,
+                        UInt32(path.utf8.count),
+                        statType,
+                        &attributes)
+                }
+            }
+            do {
+                try checkSFTPResult(result, sftpID: id)
+            } catch SSHError.sftpFailure(let status) where Self.isMissingPathStatus(status) {
+                return nil
+            }
+            return Self.fileStatus(of: attributes)
+        }
+    }
+
+    /// Lists the entries of one directory that match `query`, with the
+    /// attributes readdir reported for each. A missing directory is nil.
+    ///
+    /// Names are decoded into a 1 KiB buffer without the `ls -l` long entry,
+    /// which libssh2 permits; a batch the client still cannot decode loses
+    /// only that batch, so the listing reports `scanIncomplete` instead of
+    /// failing whole.
+    func listSFTPEntries(
+        id: UInt64,
+        path: String,
+        query: SSHSFTPEntryQuery,
+        timeout: Duration
+    ) async throws -> SSHSFTPEntryListing? {
+        try await withDiagnosticPhase("SFTP list entries") {
+            guard Self.isValidSFTPPath(path) else { throw SSHError.channelFailed }
+            let deadline = ContinuousClock.now.advanced(by: timeout)
+            return try await withSFTPUse(id: id, deadline: deadline) {
+                let opened: UInt64?
+                do {
+                    opened = try await openSFTPDirIfPresent(
+                        sftpID: id,
+                        path: path,
+                        deadline: deadline)
+                } catch SSHError.sftpFailure(let status) where Self.isMissingPathStatus(status) {
+                    opened = nil
+                }
+                guard let dirID = opened else { return nil }
+                do {
+                    var matches: [SSHSFTPEntry] = []
+                    var scanned = 0
+                    var lostBatches = 0
+                    var incomplete = false
+                    scan: while true {
+                        switch try await readSFTPEntry(
+                            sftpID: id,
+                            fileID: dirID,
+                            deadline: deadline)
+                        {
+                        case .end:
+                            break scan
+                        case .lostBatch:
+                            incomplete = true
+                            lostBatches += 1
+                            // Each lost batch is consumed, so this ends;
+                            // the cap only bounds a server that never
+                            // sends a decodable name.
+                            if lostBatches >= Self.maximumLostReaddirBatches { break scan }
+                        case .entry(let entry):
+                            scanned += 1
+                            if query.matches(entry) { matches.append(entry) }
+                            if scanned >= query.maximumScanned {
+                                incomplete = true
+                                break scan
+                            }
+                        }
+                    }
+                    try await closeSFTPFileWithinUse(
+                        sftpID: id,
+                        fileID: dirID,
+                        timeout: timeout)
+                    return SSHSFTPEntryListing(
+                        matches: matches,
+                        query: query,
+                        scanIncomplete: incomplete)
+                } catch {
+                    try? await closeSFTPFileWithinUse(
+                        sftpID: id,
+                        fileID: dirID,
+                        timeout: .seconds(2))
+                    throw normalize(error)
+                }
+            }
+        }
+    }
+
+    private static let maximumLostReaddirBatches = 64
+
+    private enum ReaddirStep {
+        case entry(SSHSFTPEntry)
+        case lostBatch
+        case end
+    }
+
+    /// Reads one readdir entry with its attributes for `listSFTPEntries`.
+    private func readSFTPEntry(
+        sftpID: UInt64,
+        fileID: UInt64,
+        deadline: ContinuousClock.Instant
+    ) async throws -> ReaddirStep {
+        let owner = allocateTransportSendOwner()
+        await acquireOperation()
+        defer { releaseOperation() }
+        do {
+        while true {
+            try checkProgress(deadline: deadline)
+            try await waitForTransportSendAdmission(
+                owner: owner,
+                deadline: deadline,
+                cancellable: true)
+            let session = try requireSession()
+            guard
+                let state = sftpClients[sftpID],
+                let dir = state.files[fileID]
+            else {
+                throw SSHError.connectionInvalidated
+            }
+            var nameBuffer = [CChar](repeating: 0, count: 1_024)
+            var attributes = LIBSSH2_SFTP_ATTRIBUTES()
+            let count: Int32 = nameBuffer.withUnsafeMutableBufferPointer { namePointer in
+                withUnsafeMutablePointer(to: &attributes) { attributesPointer in
+                    libssh2_sftp_readdir_ex(
+                        dir,
+                        namePointer.baseAddress,
+                        namePointer.count,
+                        nil,
+                        0,
+                        attributesPointer)
+                }
+            }
+            let disposition = notePacketProducingResult(
+                count,
+                owner: owner,
+                session: session)
+            if count == LIBSSH2_ERROR_EAGAIN {
+                applyTransportSendOwnerDisposition(disposition)
+                try await waitForSession(session, deadline: deadline)
+                continue
+            }
+            if count == LIBSSH2_ERROR_PROTO {
+                // libssh2 could not decode a name in the current batch and
+                // dropped the rest of it; the next call asks for a new one.
+                applyTransportSendOwnerDisposition(disposition)
+                if disposition == .invalidate { throw SSHError.connectionInvalidated }
+                return .lostBatch
+            }
+            if count < 0 {
+                let error = libssh2_session_last_errno(session)
+                if Self.isConnectionLoss(error) {
+                    invalidateResources()
+                    throw SSHError.connectionInvalidated
+                }
+                let status = UInt64(libssh2_sftp_last_error(state.handle))
+                applyTransportSendOwnerDisposition(disposition)
+                if disposition == .invalidate {
+                    throw SSHError.connectionInvalidated
+                }
+                throw SSHError.sftpFailure(status: status)
+            }
+            applyTransportSendOwnerDisposition(disposition)
+            if count == 0 { return .end }
+            let nameData = Data(nameBuffer.prefix(Int(count)).map { UInt8(bitPattern: $0) })
+            let name =
+                String(data: nameData, encoding: .utf8)
+                ?? String(decoding: nameData, as: UTF8.self)
+            return .entry(SSHSFTPEntry(name: name, status: Self.fileStatus(of: attributes)))
+        }
+        } catch {
+            if transportSendOwner == owner { invalidateResources() }
+            throw error
+        }
+    }
+
+    private static func fileStatus(of attributes: LIBSSH2_SFTP_ATTRIBUTES) -> SSHSFTPFileStatus {
+        let flags = attributes.flags
+        return SSHSFTPFileStatus(
+            permissions: flags & UInt(LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0
+                ? attributes.permissions : nil,
+            size: flags & UInt(LIBSSH2_SFTP_ATTR_SIZE) != 0 ? attributes.filesize : nil,
+            modificationTime: flags & UInt(LIBSSH2_SFTP_ATTR_ACMODTIME) != 0
+                ? attributes.mtime : nil)
+    }
+
+    private static func isMissingPathStatus(_ status: UInt64) -> Bool {
+        status == UInt64(LIBSSH2_FX_NO_SUCH_FILE) || status == UInt64(LIBSSH2_FX_NO_SUCH_PATH)
+    }
+
     private func openSFTPDirIfPresent(
         sftpID: UInt64,
         path: String,
@@ -2681,6 +2905,21 @@ actor SessionDriver {
         nextStreamLocalTimeoutHookForTesting = hook
     }
 
+    /// Makes the next one-shot exec round that reaches its stderr read with no
+    /// progress, after some stderr has arrived, wait until the rest of the
+    /// reply has reached the socket, so that read is the one that takes the
+    /// stdout reply off it (#523).
+    func waitForInboundBeforeNextExchangeStderrReadForTesting() {
+        nextExchangeStderrReadWaitsForInboundForTesting = true
+    }
+
+    /// Makes the next exec stream round whose stderr read found nothing wait
+    /// until the command's remaining output has reached the socket, so the
+    /// stdout read is the one that takes the trailing stderr off it (#523).
+    func waitForInboundBeforeNextExecStdoutReadForTesting() {
+        nextExecStdoutReadWaitsForInboundForTesting = true
+    }
+
     private func runStreamLocalTimeoutHookForTestingIfNeeded(_ error: any Error) async throws {
         // The app's request deadline can cancel before the driver's own timer.
         guard let failure = error as? SSHError,
@@ -2863,8 +3102,9 @@ actor SessionDriver {
         activity.install(on: createdSession)
         try configureAlgorithms(createdSession)
 
+        let handshakeDescriptor = descriptor
         let handshakeResult = try await repeatUntilComplete(deadline: deadline) {
-            libssh2_session_handshake(createdSession, descriptor)
+            libssh2_session_handshake(createdSession, handshakeDescriptor)
         }
         guard handshakeResult == 0 else {
 #if DEBUG
@@ -3272,11 +3512,17 @@ actor SessionDriver {
         let watch: SessionActivityWatch
     }
 
-    private func sessionWaitPlan(_ session: OpaquePointer) -> SessionWaitPlan {
+    /// A round that reads more than one stream passes the watch it took before
+    /// its first read: a later read can take an earlier stream's reply off the
+    /// socket, and only that earlier count shows the reply is already queued.
+    private func sessionWaitPlan(
+        _ session: OpaquePointer,
+        watching watch: SessionActivityWatch? = nil
+    ) -> SessionWaitPlan {
         SessionWaitPlan(
             descriptor: descriptor,
             directions: sessionDirections(session),
-            watch: activity.watch())
+            watch: watch ?? activity.watch())
     }
 
     private func awaitSessionProgress(
@@ -4091,6 +4337,7 @@ actor SessionDriver {
         while true {
             do {
                 try checkProgress(deadline: deadline)
+                let roundWatch = activity.watch()
                 var madeProgress = false
                 var skipReads = false
                 let resumingRead = transportSendOwner == stdoutOwner || transportSendOwner == stderrOwner
@@ -4163,6 +4410,14 @@ actor SessionDriver {
                             owner: stderrOwner,
                             deadline: deadline,
                             cancellable: true)
+                        #if DEBUG
+                        if nextExchangeStderrReadWaitsForInboundForTesting, sentEOF, !madeProgress, !stderr.isEmpty {
+                            nextExchangeStderrReadWaitsForInboundForTesting = false
+                            // Outlast the command, so its whole reply has
+                            // reached the socket before this read.
+                            usleep(600_000)
+                        }
+                        #endif
                         let stderrChannel = try resolveChannel(identity)
                         let stderrSession = try requireSession()
                         let stderrRead = try readAvailableNoting(
@@ -4208,7 +4463,7 @@ actor SessionDriver {
                         reachedEOF: true)
                 }
 
-                let plan = sessionWaitPlan(try requireSession())
+                let plan = sessionWaitPlan(try requireSession(), watching: roundWatch)
                 if madeProgress {
                     releaseOperation()
                     await Task.yield()

@@ -3,6 +3,10 @@ import Foundation
 /// One local git exec at a time for a Host, including lazy patch and directory
 /// reads. Cancellation removes queued work; the owner releases only when its
 /// Transport call returns, even when a remote process may still be draining.
+///
+/// Also serializes Notification Registration file writes across Hosts
+/// (`NotificationRegistrationCeremony`): a FIFO, cancellable, non-reentrant
+/// critical section is all either use needs.
 actor GitExecGate {
     private struct Waiter {
         let id: UUID

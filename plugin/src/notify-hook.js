@@ -36,6 +36,7 @@ import { encryptNotificationEnvelope } from "./notification-envelope.js";
 import { readNotificationConfig } from "./notification-config.js";
 import { refreshSidebarSnapshotForEvent } from "./sidebar-config.js";
 import { forDisplay, optionalText } from "./display-text.js";
+import { deliversToSession, hookSession, sessionStateDir } from "./session.js";
 
 // Statuses that notify (ADR 0008: Working/Idle transitions never do), keyed
 // by the registration file's per-device `notify` preference flag they gate on.
@@ -75,9 +76,10 @@ function parseStatusEvent(raw) {
 /**
  * Read the Notification Registration file (`notifications.json`, contract in
  * README.md). Absent, corrupt, or foreign-version files mean "send nothing";
- * a malformed device entry is skipped, never fatal for its neighbors.
+ * a malformed device entry is skipped, never fatal for its neighbors. Only
+ * entries delivered to this hook's herdr session count (src/session.js).
  */
-function readEligibleDevices(configDir, status) {
+function readEligibleDevices(configDir, status, session) {
   const flag = NOTIFY_FLAG_BY_STATUS[status];
   let file;
   try {
@@ -89,6 +91,7 @@ function readEligibleDevices(configDir, status) {
   const devices = [];
   for (const entry of file.devices) {
     if (typeof entry?.token !== "string" || entry.token.length === 0) continue;
+    if (!deliversToSession(entry, session)) continue;
     if (!APNS_ENVIRONMENTS.has(entry.env)) continue;
     // Per the v1 contract a missing notify flag means do not send (fail closed).
     if (entry.notify?.[flag] !== true) continue;
@@ -123,7 +126,8 @@ function pruneTokens(configDir, tokens) {
 // Per-pane dedupe state under HERDR_PLUGIN_STATE_DIR: the last status this
 // hook actually delivered a push for, cleared once a different status is
 // confirmed to hold. Pane ids go through base64url so ids never have to be
-// filesystem-safe.
+// filesystem-safe. `stateDir` is already the session's state directory, so
+// panes with the same id in different herdr sessions dedupe independently.
 function statePath(stateDir, paneId) {
   return join(stateDir, "notify", `${Buffer.from(paneId, "utf8").toString("base64url")}.json`);
 }
@@ -293,7 +297,8 @@ async function main() {
   const configDir = requireEnv("HERDR_PLUGIN_CONFIG_DIR");
   refreshSidebarSnapshotForEvent(configDir);
   const eventJson = requireEnv("HERDR_PLUGIN_EVENT_JSON");
-  const stateDir = requireEnv("HERDR_PLUGIN_STATE_DIR");
+  const session = hookSession();
+  const stateDir = sessionStateDir(requireEnv("HERDR_PLUGIN_STATE_DIR"), session);
   const binPath = requireEnv("HERDR_BIN_PATH");
 
   const event = parseStatusEvent(eventJson);
@@ -305,7 +310,7 @@ async function main() {
   const lastNotified = readLastNotified(stateDir, event.paneId);
   if (notifyWorthy && lastNotified === event.status) return; // dedupe
   if (!notifyWorthy && lastNotified === null) return; // nothing to send or re-arm
-  if (notifyWorthy && readEligibleDevices(configDir, event.status).length === 0) return;
+  if (notifyWorthy && readEligibleDevices(configDir, event.status, session).length === 0) return;
   // Debounce: only a status that still holds after the sleep notifies
   // (or re-arms), so detection flapping never reaches the user.
   await sleep(config.debounceMs);
@@ -323,7 +328,7 @@ async function main() {
   // Re-read both after the sleep: a concurrent invocation may have delivered,
   // and the app may have rewritten the registration file meanwhile.
   if (readLastNotified(stateDir, event.paneId) === event.status) return;
-  const devices = readEligibleDevices(configDir, event.status);
+  const devices = readEligibleDevices(configDir, event.status, session);
   if (devices.length === 0) return;
 
   // The re-check is the fresher read for anything that can change while the

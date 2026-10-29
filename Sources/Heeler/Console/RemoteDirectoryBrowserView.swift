@@ -40,7 +40,7 @@ struct RemoteDirectoryBrowserView: View {
                         if browser.visibleDirectories.isEmpty {
                             emptyState
                         } else {
-                            ForEach(browser.visibleDirectories, id: \.self) { name in
+                            ForEach(browser.visibleDirectories, id: \.self) { @Sendable name in
                                 Button {
                                     browser.enter(name)
                                 } label: {
@@ -60,11 +60,13 @@ struct RemoteDirectoryBrowserView: View {
                                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                                     .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.plain)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                                 .accessibilityHint("Open folder")
                                 .accessibilityIdentifier("directory-browser-folder-\(name)")
                             }
+                            // Not on the rows: their content is Sendable, and `.plain`
+                            // is isolated to the main actor.
+                            .buttonStyle(.plain)
                         }
                     } header: {
                         Text("Folders")

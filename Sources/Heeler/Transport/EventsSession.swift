@@ -148,6 +148,10 @@ actor EventsSession {
     /// whatever moment either stream is actually consumed.
     nonisolated var currentLatency: Duration? { latencyBox.withLock { $0 } }
     private nonisolated let latencyBox = Mutex<Duration?>(nil)
+    /// The catalog route the current connection reached (ADR 0022). Ordered
+    /// against status updates exactly as `currentLatency` is.
+    nonisolated var currentRouteID: UUID? { routeIDBox.withLock { $0 } }
+    private nonisolated let routeIDBox = Mutex<UUID?>(nil)
     /// How many updates the bounded buffer has shed so far. Every shed
     /// update is covered by a marker (see `yieldUpdate`), so this is
     /// observability for diagnostics and tests, not a consumer signal.
@@ -303,6 +307,20 @@ actor EventsSession {
         await enqueueLifecycleTransition { await self.deactivate() }
     }
 
+    /// The user stopped waiting for this Host to connect: the attempt in
+    /// flight (an SSH dial, or an Overlay Network still coming up) or the
+    /// backoff before the next one ends at once, and the session rests on
+    /// `.suspended` — no failure, no timeout — until `retry()` or the next
+    /// `resume()`. A session whose events channel is live is left alone.
+    func cancelConnecting() async {
+        await enqueueLifecycleTransition { await self.stopConnecting() }
+    }
+
+    private func stopConnecting() async {
+        guard liveStream == nil else { return }
+        await deactivate()
+    }
+
     /// Terminal teardown: like `suspend()`, then finishes `updates` for
     /// good. Idempotent.
     func end() async {
@@ -367,22 +385,7 @@ actor EventsSession {
             // replacement surfaces that cause instead of a second full
             // wait, and a failing redial releases the waiter through the
             // run loop's announce with its real cause.
-            if isSameTransport(currentTransport, transport) {
-                transportSuspect = true
-                currentTransport = nil
-                // The run loop is parked on the live stream and cannot act on
-                // the suspect mark by itself: a link whose events reader is
-                // still alive never ends the stream, and with the keepalive
-                // quiet or disabled nothing else wakes it — the retry below
-                // would wait forever. End the channel the way a failed
-                // keepalive does, but flagged as a deliberate re-subscribe so
-                // the run loop re-dials silently (no `.reconnecting`) and
-                // installs the replacement this retry rides. A redial that
-                // fails instead releases the waiter through the run loop's
-                // announce with its real cause.
-                resubscribeRequested = true
-                await liveStream?.end()
-            }
+            await distrust(transport)
             let replacement = try await awaitUsableTransport()
             do {
                 let value = try await operation(replacement)
@@ -402,6 +405,26 @@ actor EventsSession {
         case .sshUnreachable, .timedOut: true
         default: false
         }
+    }
+
+    /// Marks `transport` suspect while it is still the installed one, so the
+    /// run loop replaces it. The run loop is parked on the live stream and
+    /// cannot act on the suspect mark by itself: a link whose events reader
+    /// is still alive never ends the stream, and with the keepalive quiet or
+    /// disabled nothing else wakes it — a caller waiting for the replacement
+    /// would wait forever. End the channel the way a failed keepalive does,
+    /// but flagged as a deliberate re-subscribe so the run loop re-dials
+    /// silently (no `.reconnecting`) and installs the replacement. A redial
+    /// that fails instead releases waiters through the run loop's announce
+    /// with its real cause. Between streams there is nothing to end: the run
+    /// loop re-checks the mark once its subscribe returns.
+    private func distrust(_ transport: any Transport) async {
+        guard isSameTransport(currentTransport, transport) else { return }
+        transportSuspect = true
+        currentTransport = nil
+        guard let liveStream else { return }
+        resubscribeRequested = true
+        await liveStream.end()
     }
 
     private func isSameTransport(
@@ -451,6 +474,7 @@ actor EventsSession {
         _ operation: @escaping @Sendable (any Transport, UInt64) async throws -> Value
     ) async throws -> Value {
         try await acquireTerminal(target: target)
+        var acquired: (any Transport)?
         do {
             try Task.checkCancellation()
             let ready = try await awaitTerminalTransport()
@@ -458,12 +482,20 @@ actor EventsSession {
             guard terminalTransportIsCurrent(ready) else {
                 throw TransportError.cancelled
             }
+            acquired = ready.transport
             let value = try await operation(ready.transport, ready.transportGeneration)
             noteConnectionActivity()
             releaseTerminal(target: target)
             return value
         } catch {
             releaseTerminal(target: target)
+            // A live terminal is often the first to hit a dead link. Distrust
+            // the transport as `withTransport` does, so the run loop redials
+            // now instead of at the next keepalive and a reattach can ride
+            // the replacement (#523).
+            if let acquired, Self.isTransportLinkFailure(error) {
+                await distrust(acquired)
+            }
             throw error
         }
     }
@@ -528,6 +560,7 @@ actor EventsSession {
         // connection's measurement.
         if case .status(let status) = update, status != .connected {
             latencyBox.withLock { $0 = nil }
+            routeIDBox.withLock { $0 = nil }
         }
         guard case .dropped = updatesContinuation.yield(update) else { return }
         droppedUpdateCount += 1
@@ -597,6 +630,14 @@ actor EventsSession {
             if !activationIsCurrent(generation) {
                 await stream.end()
                 break
+            }
+            // A caller that distrusted the Transport while this subscribe was
+            // in flight had no stream to end. Parking on this one would leave
+            // the Host connected with nothing installed, every waiter stuck
+            // and no keepalive to notice; redial instead (#523).
+            if transportSuspect || currentTransport == nil {
+                await stream.end()
+                continue
             }
             liveStream = stream
             attempt = 0
@@ -714,6 +755,7 @@ actor EventsSession {
                 throw TransportError.cancelled
             }
             publishLatency(latency)
+            routeIDBox.withLock { $0 = transport.routeID }
         } catch {
             try? await transport.close()
             throw error

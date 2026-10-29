@@ -9,6 +9,8 @@ struct NotificationSettingsView: View {
     let notificationPreferences: NotificationPreferencesStore
     @Bindable var relaySettings: NotificationRelaySettings
     let liveActivities: HostLiveActivityCoordinator
+    let pluginStatuses: HeelerPluginStatusStore
+    let refreshPluginStatuses: @MainActor ([Host.ID]) async -> Void
     @Environment(\.openURL) private var openURL
     @State private var isShowingExplainer = false
 
@@ -30,8 +32,8 @@ struct NotificationSettingsView: View {
             // Per-Host preferences (#75): registration on/off plus the
             // separate Done flag, once this device holds a push token.
             if pushRegistration.deviceToken != nil {
-                ForEach(notificationPreferences.hosts) { host in
-                    hostNotificationSection(host)
+                ForEach(notificationPreferences.hosts) { @Sendable host in
+                    MainActorContent { hostNotificationSection(host) }
                 }
             }
 
@@ -50,6 +52,7 @@ struct NotificationSettingsView: View {
         .navigationTitle("Notifications")
         .navigationBarTitleDisplayMode(.inline)
         .task { await notificationPreferences.refresh() }
+        .task { await refreshPluginStatuses(notificationPreferences.hosts.map(\.id)) }
         // The user can finish push bootstrap on this very screen; the
         // per-Host rows appear the moment the token lands.
         .onChange(of: pushRegistration.deviceToken) { _, token in
@@ -208,6 +211,12 @@ struct NotificationSettingsView: View {
                 {
                     Text("Live Activity: \(note)")
                 }
+                ForEach(pluginRequirements(for: host), id: \.feature) { @Sendable requirement in
+                    PluginRequirementNote(text: requirement.note)
+                        .accessibilityIdentifier(
+                            "settings.notifications.pluginRequirement.\(host.id.uuidString)"
+                                + ".\(requirement.feature)")
+                }
             }
             // Fail loudly (#75): a toggle that could not reach the Host
             // says so and stays on the Host's confirmed value.
@@ -216,6 +225,11 @@ struct NotificationSettingsView: View {
                     .foregroundStyle(.red)
             }
         }
+    }
+
+    private func pluginRequirements(for host: Host) -> [HeelerPluginRequirement] {
+        pluginStatuses.status(for: host.id)?.notificationRequirements(
+            liveActivityEnabled: liveActivities.isEnabled(for: host.id)) ?? []
     }
 
     @ViewBuilder

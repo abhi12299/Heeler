@@ -25,6 +25,9 @@ final class HeelerAppModel {
     let sceneDirectory: AgentSceneDirectory
     let hostStore: HostStore
     let console: ConsoleStore
+    /// Overlay Networks and their shared runtime (ADR 0021). The Console's
+    /// session factory and Host onboarding reach the same runtime.
+    let overlayNetworks: OverlayNetworkStore
     let notificationPreferences: NotificationPreferencesStore
     let terminalThemes: TerminalThemeSettings
     let terminalZoom: TerminalZoomSettings
@@ -33,11 +36,14 @@ final class HeelerAppModel {
     let snippets: SnippetStore
     let appearance: AppAppearanceSettings
     let inputMode: AgentInputModeSettings
+    let detailSurface: AgentDetailSurfaceSettings
     let relaySettings: NotificationRelaySettings
     let bannerStore: AgentNotificationBannerStore
     /// Local Agent Notifications for the free build, which cannot get push.
     let backgroundAlerts: BackgroundAlertsController
     let liveActivities: HostLiveActivityCoordinator
+    /// What a confirmed Host removal cleans up beyond the catalog (#414).
+    let hostRemoval: HostRemovalDependencies
     let activity: AppActivityCoordinator
 
     private var isStarted = false
@@ -47,13 +53,16 @@ final class HeelerAppModel {
     /// drive the activity wiring and observe that something consumed it:
     /// `AppModelActivityDriverTests` is what turns deleting the task that
     /// runs `ConsoleActivityDriver` red (#167). Defaults are the production
-    /// values: `HostStore()` reads the real persisted catalog and
-    /// `ConsoleStore()` reaches the real `sshSessionFactory()`.
+    /// values: `HostStore()` reads the real persisted catalog and the
+    /// `ConsoleStore` reaches the real `sshSessionFactory()`, keeps Chat's
+    /// cache on disk, and writes the widgets' Usage snapshot.
     init(
         pushRegistration: PushRegistrationStore,
         sceneDirectory: AgentSceneDirectory,
         hostStore: HostStore = HostStore(),
-        console: ConsoleStore = ConsoleStore(),
+        console: ConsoleStore = ConsoleStore(
+            chatCache: FileChatTranscriptCache(), usageWidgets: AgentUsageWidgetPublisher()),
+        overlayNetworks: OverlayNetworkStore = OverlayNetworkStore(),
         activity: AppActivityCoordinator = AppActivityCoordinator(),
         backgroundAlerts: BackgroundAlertsController = BackgroundAlertsController()
     ) {
@@ -61,6 +70,7 @@ final class HeelerAppModel {
         self.sceneDirectory = sceneDirectory
         self.hostStore = hostStore
         self.console = console
+        self.overlayNetworks = overlayNetworks
         self.activity = activity
         self.backgroundAlerts = backgroundAlerts
         terminalThemes = TerminalThemeSettings()
@@ -70,15 +80,20 @@ final class HeelerAppModel {
         snippets = SnippetStore()
         appearance = AppAppearanceSettings()
         inputMode = AgentInputModeSettings()
+        detailSurface = AgentDetailSurfaceSettings()
         let relaySettings = NotificationRelaySettings()
         self.relaySettings = relaySettings
         // Preference reads/writes borrow the Console's live per-Host SSH
         // connections (#75); the token comes from push bootstrap (#71), and
         // the custom relay URL (#76) rides along into each Host's notify.json.
+        // One gate for every registration-file write: Hosts on several herdr
+        // sessions of one remote user share that file (#412).
+        let registrationGate = GitExecGate()
         let notificationPreferences = NotificationPreferencesStore(
             transports: console,
             deviceToken: { [weak pushRegistration] in pushRegistration?.deviceToken },
-            relayBaseURL: { [weak relaySettings] in relaySettings?.relayURL })
+            relayBaseURL: { [weak relaySettings] in relaySettings?.relayURL },
+            ceremony: NotificationRegistrationCeremony(gate: registrationGate))
         self.notificationPreferences = notificationPreferences
         // The in-app foreground banner (#77): presented-Agent suppression
         // reads the key window's Agent at fire time; the preference gate
@@ -99,10 +114,17 @@ final class HeelerAppModel {
         // of truth while foregrounded; the plugin takes over over APNs
         // after the app suspends. Fail closed on a missing opt-in, key, or
         // device token — the same gates the registration write uses.
-        liveActivities = HostLiveActivityCoordinator(
+        let liveActivities = HostLiveActivityCoordinator(
             controller: ActivityKitLiveActivityController(),
             preferences: LiveActivityPreferences(),
             transports: console,
+            // Live Activity writes know a Host by id; its herdr session
+            // scopes which registration entry is its own (#412).
+            ceremony: NotificationRegistrationCeremony(
+                gate: registrationGate,
+                hostSession: { [weak hostStore] id in
+                    hostStore?.hosts.first(where: { $0.id == id })?.notificationSession
+                }),
             deviceToken: { [weak pushRegistration] in pushRegistration?.deviceToken },
             knownHostIDs: { [weak hostStore] in Set(hostStore?.hosts.map(\.id) ?? []) },
             hostDisplayName: { [weak hostStore] id in
@@ -118,6 +140,19 @@ final class HeelerAppModel {
                 console?.pins.pinnedPaneIDs(for: id) ?? []
             },
             rowLayout: { [weak console] id in console?.rowLayout(for: id) })
+        self.liveActivities = liveActivities
+        hostRemoval = HostRemovalDependencies.app(
+            console: console, notificationPreferences: notificationPreferences,
+            liveActivities: liveActivities)
+        // A Live Activity write that found no entry stays dirty; a fresh
+        // registration is its cue to retry.
+        notificationPreferences.onRegistered = { [weak liveActivities] _ in
+            liveActivities?.connectionsDidChange()
+        }
+        // A window can render before start() runs. Publish the configured
+        // Hosts and begin loading saved Chats before that first render;
+        // connections still wait for start() to resume the Console.
+        console.setHosts(hostStore.hosts)
         backgroundAlerts.onKeepAliveLost = { [weak self] in self?.pauseConnectionsInBackground() }
     }
 
@@ -152,8 +187,17 @@ final class HeelerAppModel {
         // background and rendering nothing, and a consumer that only compares
         // the value it last saw misses both that edge and the resume behind
         // it (#142). The stream has one consumer for the life of the process.
+        // Overlay nodes stop with the connections they carried. After the
+        // Console resumes, pending browser sign-ins also resume, even when
+        // no Host has been added to bring their nodes back up with a dial.
+        let overlayNetworks = overlayNetworks
         Task {
-            await ConsoleActivityDriver(activity: activity, console: console).run()
+            await ConsoleActivityDriver(
+                activity: activity,
+                console: console,
+                afterSuspend: { await overlayNetworks.suspend() },
+                afterResume: { await overlayNetworks.resumeBrowserSignInAfterActivation() }
+            ).run()
         }
         Task { await pushRegistration.refresh() }
         // Existing installs' Notification Keys predate the app-group
@@ -186,6 +230,7 @@ final class HeelerAppModel {
             if !backgroundAlerts.keepsConnectionsInBackground {
                 pauseConnectionsInBackground()
             }
+            Task { await scheduleUsageRefresh() }
         default:
             break
         }
@@ -197,6 +242,27 @@ final class HeelerAppModel {
     private func pauseConnectionsInBackground() {
         backgroundAlerts.connectionsWillPause()
         activity.didEnterBackground()
+    }
+
+    /// The Usage widgets' app refresh task: reads the Hosts whose figures
+    /// went stale and asks for the next run.
+    func refreshUsageInBackground() async {
+        guard await scheduleUsageRefresh(), let publisher = console.usageWidgets else { return }
+        await AgentUsageBackgroundRefresh.live().run(hosts: hostStore.hosts, publisher: publisher)
+    }
+
+    /// Asks for a background Usage read while a Usage widget is installed,
+    /// and withdraws the request once none is.
+    @discardableResult
+    private func scheduleUsageRefresh() async -> Bool {
+        guard let publisher = console.usageWidgets, !hostStore.hosts.isEmpty,
+            await publisher.widgetsInstalled()
+        else {
+            AgentUsageBackgroundRefresh.cancel()
+            return false
+        }
+        AgentUsageBackgroundRefresh.schedule()
+        return true
     }
 
     /// Store-to-store wiring that used to hang off the single window's view.

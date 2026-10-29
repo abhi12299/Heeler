@@ -48,17 +48,26 @@ Native iOS companion app for [herdr](https://herdr.dev), an agent console over S
   over SSH for encrypted notifications; host-key policy is TOFU with fingerprint
   confirmation. Preserve these boundaries when changing authentication.
 - Dependency updates must keep exact pins and review source hashes plus
-  committed XCFramework checksums (`Packages/HeelerSSH` and libghostty-spm).
+  committed XCFramework checksums (`Packages/HeelerSSH`, libghostty-spm, and
+  heeler-overlay-natives).
 - User-visible changes get a `CHANGELOG.md` Unreleased entry referencing the PR;
   internal refactors and test work stay out. Domain term changes update
   `CONTEXT.md`; hard-to-reverse, surprising trade-offs get an ADR.
 - Release work follows [releasing.md](docs/guides/releasing.md): `make publish`
   cuts CHANGELOG and versions and pushes the tag; `release.yml` signs and
   uploads it. `make bump && make testflight` stays a local
-  interim upload. The release runner owns version edits and tags.
+  interim upload. The release runner owns version edits and tags; a failed
+  release that published nothing keeps its version (re-run or re-cut).
+- The herdr plugin ships from the generated, append-only `plugin` branch
+  ([ADR 0026](docs/adr/0026-plugin-distribution-branch.md)). Bump every
+  version the plugin README's "Releasing a plugin version" lists, merge, then
+  run `make plugin` before the `make publish` that bundles it. Content
+  changed without a bump stays on `main` until the next bump. `plugin/` on
+  `main` stays directly installable, because older apps install from it.
 - Commits and PRs carry no attribution trailers or email addresses; local hooks
   and CI enforce the [contribution policy](CONTRIBUTING.md#commit-attribution).
-  Reference issues with `refs #<n>`.
+  Commits reference issues with `refs #<n>`; a PR that resolves an issue ends
+  its body with `Closes #<n>`, a partial one with `refs #<n>`.
 
 ## Tracker
 

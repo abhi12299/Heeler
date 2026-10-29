@@ -29,8 +29,10 @@ import {
 } from "./activity-state.js";
 import { parseActivityRowLayout } from "./activity-rows.js";
 import { readNotificationConfig } from "./notification-config.js";
+import { recordUsageRuntime } from "./usage-runtime.js";
 import { refreshSidebarSnapshotForEvent } from "./sidebar-config.js";
 import { optionalText } from "./display-text.js";
+import { deliversToSession, hookSession, sessionStateDir } from "./session.js";
 
 const SEND_ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -69,8 +71,9 @@ function parseStatusEvent(raw) {
 /**
  * Devices whose registration entry carries a usable Live Activity token.
  * `notify` flags do not apply; a missing `live_activity` object means skip.
+ * Only entries delivered to this hook's herdr session count (src/session.js).
  */
-function readActivityDevices(configDir) {
+function readActivityDevices(configDir, session) {
   let file;
   try {
     file = JSON.parse(readFileSync(join(configDir, "notifications.json"), "utf8"));
@@ -80,6 +83,7 @@ function readActivityDevices(configDir) {
   if (file?.v !== 1 || !Array.isArray(file.devices)) return [];
   const devices = [];
   for (const entry of file.devices) {
+    if (!deliversToSession(entry, session)) continue;
     const live = entry?.live_activity;
     if (typeof live !== "object" || live === null || Array.isArray(live)) continue;
     if (typeof live.token !== "string" || !ACTIVITY_TOKEN_PATTERN.test(live.token)) continue;
@@ -120,6 +124,9 @@ function pruneLiveActivity(configDir, tokens) {
   writeAtomic(path, JSON.stringify(file));
 }
 
+// `stateDir` is already the session's state directory, so each herdr session
+// keeps its own claim and last-state: one session's debounce never supersedes
+// another's, and one session ending its activity never silences another.
 function activityDir(stateDir) {
   return join(stateDir, "activity");
 }
@@ -421,15 +428,22 @@ async function deliver(config, device, plaintextObject, request) {
 async function main() {
   const configDir = requireEnv("HERDR_PLUGIN_CONFIG_DIR");
   refreshSidebarSnapshotForEvent(configDir);
+  try {
+    recordUsageRuntime(configDir);
+  } catch (error) {
+    // Usage setup must not suppress a Live Activity update.
+    console.error(`usage-runtime: recording failed (${error.code ?? "invalid runtime"})`);
+  }
   const eventJson = requireEnv("HERDR_PLUGIN_EVENT_JSON");
-  const stateDir = requireEnv("HERDR_PLUGIN_STATE_DIR");
+  const session = hookSession();
+  const stateDir = sessionStateDir(requireEnv("HERDR_PLUGIN_STATE_DIR"), session);
   const binPath = requireEnv("HERDR_BIN_PATH");
 
   const event = parseStatusEvent(eventJson);
   const config = readNotificationConfig(configDir);
 
   // Cheap exits before burning a debounce process on a no-op.
-  if (readActivityDevices(configDir).length === 0) return;
+  if (readActivityDevices(configDir, session).length === 0) return;
   const lastState = readLastState(stateDir);
   if (lastState?.ended === true && !ELIGIBLE_STATUSES.has(event.status)) return;
 
@@ -438,7 +452,7 @@ async function main() {
   await sleep(config.activityDebounceMs);
   if (claimSuperseded(claim, readClaim(stateDir))) return;
 
-  const devices = readActivityDevices(configDir);
+  const devices = readActivityDevices(configDir, session);
   if (devices.length === 0) return;
 
   const agents = await listAgents(binPath);

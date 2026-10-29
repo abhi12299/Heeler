@@ -32,8 +32,8 @@ struct AgentListFieldsSettingsView: View {
     private var hostList: some View {
         List {
             sessionSection
-            ForEach(hosts) { host in
-                hostRow(host)
+            ForEach(hosts) { @Sendable host in
+                MainActorContent { hostRow(host) }
             }
             AgentLayoutErrorView(editor: editor)
         }
@@ -109,6 +109,7 @@ struct AgentListFieldsHostDetailView: View {
                 AgentListFieldsAddFieldSheet(
                     editor: editor, destination: destination, hostName: host.displayName)
             }
+            .task { await console.refreshPluginStatuses(for: [host.id]) }
     }
 
     private var layout: AgentRowLayout { editor.layout(for: host.id) }
@@ -147,6 +148,17 @@ struct AgentListFieldsHostDetailView: View {
                 Text(AgentListFieldsCopy.detailIntro)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                if let requirement = console.pluginStatuses.status(for: host.id)?
+                    .requirements(for: [.sidebarFields]).first
+                {
+                    // Without a snapshot, Sync from plugin silently fills
+                    // fallback fields; say why before the user tries it.
+                    PluginRequirementNote(text: requirement.note)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(
+                            "settings.agentList.pluginRequirement.\(host.id.uuidString)")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -174,17 +186,20 @@ struct AgentListFieldsHostDetailView: View {
     @ViewBuilder
     private var hostRows: some View {
         let slotRows = AgentRowSlot.slotRows(layout.rows)
-        ForEach(Array(slotRows.enumerated()), id: \.offset) { index, row in
-            AgentListFieldsRowEditor(
-                index: index, row: row, isEnabled: !isSyncing && !editor.isCatalogUnreadable,
-                onAdd: {
-                    addingField = AgentListFieldsEditorDestination(hostID: host.id, rowIndex: index)
-                },
-                onToggleStyle: { fieldIndex in toggleStyle(fieldIndex, rowIndex: index) },
-                onShift: { fieldIndex, delta in shift(fieldIndex, by: delta, rowIndex: index) },
-                onRemove: { fieldIndex in remove(fieldIndex, rowIndex: index) })
-                .listRowInsets(AgentListFieldsChrome.rowInsets)
-                .agentListHostSurface(isFirst: false, isLast: false)
+        ForEach(Array(slotRows.enumerated()), id: \.offset) { @Sendable index, row in
+            MainActorContent {
+                AgentListFieldsRowEditor(
+                    index: index, row: row, isEnabled: !isSyncing && !editor.isCatalogUnreadable,
+                    onAdd: {
+                        addingField = AgentListFieldsEditorDestination(
+                            hostID: host.id, rowIndex: index)
+                    },
+                    onToggleStyle: { fieldIndex in toggleStyle(fieldIndex, rowIndex: index) },
+                    onShift: { fieldIndex, delta in shift(fieldIndex, by: delta, rowIndex: index) },
+                    onRemove: { fieldIndex in remove(fieldIndex, rowIndex: index) })
+                    .listRowInsets(AgentListFieldsChrome.rowInsets)
+                    .agentListHostSurface(isFirst: false, isLast: false)
+            }
         }
     }
 
@@ -312,8 +327,8 @@ private struct AgentListFieldsRowEditor: View {
                 .font(.callout)
                 .foregroundStyle(.primary)
             ChipWrap(spacing: 5) {
-                ForEach(Array(row.enumerated()), id: \.offset) { offset, token in
-                    fieldChip(token, at: offset)
+                ForEach(Array(row.enumerated()), id: \.offset) { @Sendable offset, token in
+                    MainActorContent { fieldChip(token, at: offset) }
                 }
                 addChip
             }
@@ -475,6 +490,10 @@ enum AgentListFieldsCopy {
         "Tap a field to change its style, move it, or remove it. Tap + to add one. Changes save right away."
     static let syncConfirmation =
         "This Host's rows are replaced with its herdr fields and saved right away."
+    /// Sync's result when the plugin snapshot carries diagnostics.
+    static let syncDiagnostics =
+        "The Heeler plugin couldn't read this Host's herdr sidebar settings, so herdr's "
+        + "default fields were used. Update the plugin, or run herdr config check."
     static let unreadableCatalogTitle = "Saved fields can’t be read"
     static let unreadableCatalog =
         "Heeler kept the saved data untouched. Every Host follows its herdr fields, and editing "

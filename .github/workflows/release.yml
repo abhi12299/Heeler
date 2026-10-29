@@ -101,7 +101,8 @@ jobs:
               index($0, heading) == 1 { inside = 1; next }
               inside && /^## / { exit }
               inside { print }
-            ' CHANGELOG.md | awk 'NF == 0 && !seen { next } { seen = 1; print }' > "$RUNNER_TEMP/notes/notes.md"
+            ' CHANGELOG.md | awk 'NF == 0 && !seen { next } { seen = 1; print }' \
+              | python3 scripts/format-release-notes.py > "$RUNNER_TEMP/notes/notes.md"
             [[ -n "$(tr -d '[:space:]' < "$RUNNER_TEMP/notes/notes.md")" ]] \
               || fail "CHANGELOG.md has no notes under [$version]"
             mode=release
@@ -207,6 +208,7 @@ jobs:
             -onlyUsePackageVersionsFromResolvedFile \
             -xcconfig "$RUNNER_TEMP/signing/signing.xcconfig" \
             ${overrides[@]+"${overrides[@]}"} \
+            HEELER_SOURCE_REVISION="$(git rev-parse HEAD)" \
             archive
 
       - name: Export the IPA
@@ -238,6 +240,19 @@ jobs:
         run: |
           xcrun altool --validate-app -f "$RUNNER_TEMP/export/Heeler.ipa" -t ios \
             --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_API_ISSUER_ID"
+
+      # A re-cut deletes an unpublished tag and creates it again on a fixed
+      # commit. A re-run keeps its original commit, and re-running failed jobs
+      # skips meta's tag check, so an older run must not upload under the tag.
+      - name: Check the tag still names this commit
+        if: env.MODE == 'release'
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tagged="$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
+          [[ "$tagged" == "$GITHUB_SHA" ]] \
+            || { echo "::error::$TAG now names ${tagged:-nothing}, not $GITHUB_SHA: a re-cut replaced or removed the tag, so this run must not upload. Re-run only the run the current $TAG started."; exit 1; }
 
       - name: Upload to App Store Connect
         if: env.MODE == 'release'

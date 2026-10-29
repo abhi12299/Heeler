@@ -51,13 +51,14 @@ struct ShellTerminalView: View {
     /// This view's own window, for hosts without a scene root.
     @State private var mountedWindow = WindowReference()
     @Environment(\.detailTopChromeInset) private var topChromeInset
+    @Environment(\.detailBarRow) private var barRow
     @Environment(\.detailSurfaceEdges) private var surfaceEdges
     @Environment(\.revealDetailSidebar) private var revealDetailSidebar
-    @Environment(\.showsDetailBackHeader) private var showsBackHeader
+    @Environment(\.showsDetailBackButton) private var showsBackButton
     /// Shared with Agent detail's header: folding it is one reading
     /// preference across both kinds of terminal.
     @AppStorage("agent.back-header-expanded") private var isBackHeaderExpanded = false
-    /// The Workspace drawer's panel, while the back header's button owns it.
+    /// The Workspace drawer's panel, while the back header's menu owns it.
     @State private var isHeaderDrawerOpen = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The window's own controls over this screen's top-leading corner, on
@@ -192,9 +193,9 @@ struct ShellTerminalView: View {
             .overlay {
                 if let workspaceDrawer {
                     let drawer = keyboardCarryingDrawer(workspaceDrawer).palette(themePalette)
-                    // The back header's button stands in for the edge handle
+                    // The back header's menu stands in for the edge handle
                     // while the header is out; folded, the handle comes back.
-                    if showsBackHeader, isBackHeaderExpanded {
+                    if isBackHeaderExpanded {
                         drawer.openedFromHeader(
                             $isHeaderDrawerOpen,
                             panelTop: backHeaderTop + AgentDetailHeader.controlSize + 8)
@@ -229,8 +230,9 @@ struct ShellTerminalView: View {
                         isReturning: isReturning,
                         isClosingTerminal: isClosingTerminal,
                         onBack: { Task { await goBack() } },
+                        isConfirmingClose: $isConfirmingClose,
                         onCloseTerminal: onCloseTerminal == nil
-                            ? nil : { isConfirmingClose = true }))
+                            ? nil : { closeTerminal() }))
             }
             .padding(.bottom, keyboardLayout.contentInset)
             // This dock is always present at the system keyboard's last
@@ -255,24 +257,24 @@ struct ShellTerminalView: View {
             // keeps terminal output below the system clock.
             .padding(.top, terminalTopInset)
             .overlay(alignment: .top) {
-                if showsBackHeader {
-                    AgentDetailHeader(
-                        palette: themePalette,
-                        isExpanded: $isBackHeaderExpanded,
-                        onBack: {
+                AgentDetailHeader(
+                    palette: themePalette,
+                    isExpanded: $isBackHeaderExpanded,
+                    onBack: showsBackButton
+                        ? {
                             guard !isReturning else { return }
                             Task { await goBack() }
-                        },
-                        actions: backHeaderActions)
-                    .environment(
-                        \.colorScheme,
-                        terminal.themes.selection(for: colorScheme)
-                            .chromeColorScheme(for: colorScheme))
-                    .padding(.horizontal, 12)
-                    .padding(.top, backHeaderTop)
-                    .onChange(of: isBackHeaderExpanded) { _, expanded in
-                        if !expanded { isHeaderDrawerOpen = false }
-                    }
+                        } : nil,
+                    actions: backHeaderActions,
+                    trailingInBar: headerSharesBar)
+                .environment(
+                    \.colorScheme,
+                    terminal.themes.selection(for: colorScheme)
+                        .chromeColorScheme(for: colorScheme))
+                .padding(.horizontal, 12)
+                .padding(.top, backHeaderTop)
+                .onChange(of: isBackHeaderExpanded) { _, expanded in
+                    if !expanded { isHeaderDrawerOpen = false }
                 }
             }
             .onWindowControlsHeightChange { windowControlsHeight = $0 }
@@ -308,21 +310,9 @@ struct ShellTerminalView: View {
             .toolbarBackground(Color.clear, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar(.visible, for: .navigationBar)
-            .confirmationDialog(
-                "Close Terminal?", isPresented: $isConfirmingClose, titleVisibility: .visible
-            ) {
-                Button("Close Terminal", role: .destructive) {
-                    if backReturnsToAgent {
-                        armAgentKeyboardHandoffIfKeyboardIsUp(for: agentID)
-                    }
-                    onCloseTerminal?()
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text(
-                    "This closes the pane on the Host, ending anything running in it. "
-                        + "Going Back instead leaves it for desktop handoff.")
-            }
+            .detailHeaderBarControls(
+                headerSharesBar, palette: themePalette, isExpanded: $isBackHeaderExpanded,
+                actions: backHeaderActions)
             .sheet(
                 isPresented: Binding(
                     get: { store.pendingPaste != nil },
@@ -388,20 +378,26 @@ struct ShellTerminalView: View {
         max(statusBarInset, topChromeInset, windowControlsHeight)
     }
 
-    private var backHeaderTop: CGFloat { terminalTopInset + 4 }
+    private var backHeaderTop: CGFloat {
+        AgentDetailHeader.top(outputTop: terminalTopInset, barRow: barRow)
+    }
 
-    /// An iPhone's terminal pushed over the Console list goes back the
-    /// system's way, following the finger. One opened from an Agent stands
-    /// in for that Agent on the same screen, so a system swipe there would
-    /// leave the Agent too; it keeps the edge gesture that returns to it.
+    private var headerSharesBar: Bool { AgentDetailHeader.levelsWithBar(barRow) }
+
+    /// A terminal pushed over the Console list goes back the system's way,
+    /// following the finger. One opened from an Agent stands in for that
+    /// Agent on the same screen, so a system swipe there would leave the
+    /// Agent too; it keeps the edge gesture that returns to it.
     private var usesSystemBackSwipe: Bool {
-        showsBackHeader && !backReturnsToAgent
+        showsBackButton && !backReturnsToAgent
     }
 
     private var backHeaderActions: [AgentDetailHeaderAction] {
         guard workspaceDrawer != nil else { return [] }
-        return [AgentDetailHeaderAction(title: "Workspace Terminals", systemImage: "terminal") {
+        return [AgentDetailHeaderAction(title: "Terminals", systemImage: "apple.terminal.on.rectangle") {
             withAnimation(reduceMotion ? nil : .snappy(duration: 0.24)) {
+                // Folded, the menu unfolds the header the panel drops from.
+                isBackHeaderExpanded = true
                 isHeaderDrawerOpen.toggle()
             }
         }]
@@ -456,6 +452,15 @@ struct ShellTerminalView: View {
         } else {
             keyboardControl.requestKeyboard()
         }
+    }
+
+    /// Confirmed Close Terminal: the keyboard state goes back to the Agent
+    /// as it does on Back.
+    private func closeTerminal() {
+        if backReturnsToAgent {
+            armAgentKeyboardHandoffIfKeyboardIsUp(for: agentID)
+        }
+        onCloseTerminal?()
     }
 
     /// Back leaves for the Agent (or the Console): the keyboard state goes
@@ -532,10 +537,10 @@ struct ShellTerminalView: View {
                     dimsBackground: presentation.dimsBackground
                 ) {
                     Button("Reattach") { store.retryTerminal() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.terminalStatusPrimary)
                     if !managesLifecycle {
                         Button("Take Over") { store.takeOverTerminal() }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.terminalStatusSecondary)
                             .accessibilityHint("Disconnects another client's attachment to this terminal")
                     }
                 }
@@ -590,7 +595,12 @@ struct ShellTerminalMoreMenu: View {
     let isReturning: Bool
     let isClosingTerminal: Bool
     let onBack: () -> Void
-    /// Nil hides Close Terminal entirely (previews, tests).
+    /// The confirmation hangs off this button, so on iOS 26, where it is a
+    /// popover, its arrow points at the menu it came from rather than at
+    /// the middle of the screen.
+    @Binding var isConfirmingClose: Bool
+    /// Runs once Close Terminal is confirmed. Nil hides the entry entirely
+    /// (previews, tests).
     let onCloseTerminal: (() -> Void)?
 
     var body: some View {
@@ -600,8 +610,8 @@ struct ShellTerminalMoreMenu: View {
                     Label(backTitle, systemImage: "chevron.left")
                 }
                 .disabled(isReturning)
-                if let onCloseTerminal {
-                    Button(role: .destructive, action: onCloseTerminal) {
+                if onCloseTerminal != nil {
+                    Button(role: .destructive) { isConfirmingClose = true } label: {
                         Label("Close Terminal", systemImage: "trash")
                     }
                     .disabled(isClosingTerminal || isReturning)
@@ -618,6 +628,16 @@ struct ShellTerminalMoreMenu: View {
         }
         .accessibilityLabel("More")
         .accessibilityHint("Opens terminal actions")
+        .confirmationDialog(
+            "Close Terminal?", isPresented: $isConfirmingClose, titleVisibility: .visible
+        ) {
+            Button("Close Terminal", role: .destructive) { onCloseTerminal?() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This closes the pane on the Host, ending anything running in it. "
+                    + "Going Back instead leaves it for desktop handoff.")
+        }
     }
 }
 
@@ -734,22 +754,25 @@ struct ShellTerminalKeysDock: View {
 
             Divider()
             HStack(spacing: 4) {
-                ForEach(Self.tabs) { tab in
-                    Button {
-                        selectedTab = tab
-                    } label: {
-                        Image(systemName: tab.systemImageName)
-                            .font(.body)
-                            .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
-                            .frame(maxWidth: .infinity, minHeight: 40)
-                            .background(
-                                selectedTab == tab ? Color(uiColor: .secondarySystemFill) : .clear,
-                                in: .rect(cornerRadius: 8))
-                            .contentShape(.rect)
+                ForEach(Self.tabs) { @Sendable tab in
+                    MainActorContent {
+                        let isSelected = selectedTab == tab
+                        Button {
+                            selectedTab = tab
+                        } label: {
+                            Image(systemName: tab.systemImageName)
+                                .font(.body)
+                                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                                .frame(maxWidth: .infinity, minHeight: 40)
+                                .background(
+                                    isSelected ? Color(uiColor: .secondarySystemFill) : .clear,
+                                    in: .rect(cornerRadius: 8))
+                                .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(tab.accessibilityLabel)
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(tab.accessibilityLabel)
-                    .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
                 }
             }
             .padding(.horizontal, 10)

@@ -12,6 +12,8 @@ struct WorkspaceTerminalDetailView: View {
     /// Keyboard state in from the screen that selected this terminal and
     /// out to an Agent the drawer routes to; see `ShellTerminalView`.
     var keyboardHandoff: TerminalKeyboardHandoff? = nil
+    /// Where Back goes: the Console, or the Agent this was pushed over.
+    var backTitle = "Back to Console"
     let onBack: () -> Void
 
     @State private var ownerID = UUID()
@@ -24,6 +26,8 @@ struct WorkspaceTerminalDetailView: View {
     @State private var retryID = 0
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.detailSurfaceEdges) private var surfaceEdges
+    /// This window, so a remount of this screen takes its terminal over.
+    @Environment(\.agentSceneRouting) private var sceneRouting
 
     private var identity: ShellTerminalIdentity {
         ShellTerminalIdentity(paneID: terminal.paneID, tabID: terminal.tabID, terminalID: terminal.terminalID)
@@ -66,8 +70,8 @@ struct WorkspaceTerminalDetailView: View {
                         palette: themePalette,
                         dimsBackground: false
                     ) {
-                        Button("Back to Console") { onBack() }
-                            .buttonStyle(.bordered)
+                        Button(backTitle) { onBack() }
+                            .buttonStyle(.terminalStatusSecondary)
                     }
                 }
             } else if let entry, console.terminalConnections.entries[poolKey] === entry {
@@ -82,7 +86,7 @@ struct WorkspaceTerminalDetailView: View {
                     managesLifecycle: false,
                     surfaceRetention: entry.surfaceRetention,
                     title: terminal.displayTitle,
-                    backTitle: "Back to Console",
+                    backTitle: backTitle,
                     workspaceDrawer: workspaceDrawer,
                     keyboardHandoff: keyboardHandoff,
                     backReturnsToAgent: false,
@@ -97,9 +101,9 @@ struct WorkspaceTerminalDetailView: View {
                         dimsBackground: false
                     ) {
                         Button("Try Again") { retryID += 1 }
-                            .buttonStyle(.borderedProminent)
-                        Button("Back to Console") { onBack() }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.terminalStatusPrimary)
+                        Button(backTitle) { onBack() }
+                            .buttonStyle(.terminalStatusSecondary)
                     }
                 }
             } else {
@@ -224,6 +228,7 @@ struct WorkspaceTerminalDetailView: View {
         guard entry == nil, !isMissing else { return }
         entry = console.terminalConnections.reclaim(
             hostID: terminal.hostID, identity: identity, ownerID: ownerID,
+            sceneID: sceneRouting?.sceneID,
             generation: console.hostConnectionGenerations[terminal.hostID],
             isPresented: { isSelected() })
     }
@@ -239,6 +244,7 @@ struct WorkspaceTerminalDetailView: View {
         do {
             let selected = try await console.terminalConnections.select(
                 hostID: terminal.hostID, identity: identity, ownerID: ownerID,
+                sceneID: sceneRouting?.sceneID,
                 generation: console.hostConnectionGenerations[terminal.hostID],
                 isPresented: { isSelected() },
                 runTerminal: console.terminalRunner(for: terminal.hostID))
