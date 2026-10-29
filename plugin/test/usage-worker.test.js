@@ -165,6 +165,14 @@ test("symlinked Claude roots are scanned once and old records are excluded", asy
   assert.equal(log.includes('"message-old"'), false);
 });
 
+test("Claude config directories beside ~/.claude count toward one total", async t => {
+  const f = fixture(t);
+  f.transcript("one.jsonl", [assistant("one")]);
+  f.transcript("two.jsonl", [assistant("two")], join(f.env.HOME, ".claude-work"));
+  mkdirSync(join(f.env.HOME, ".claude-notes"), { recursive: true });
+  assert.equal(claude(await f.finish()).totals.today.tokens.total, 24);
+});
+
 test("fresh heartbeats keep a long-running lock and dead or reused pids are reclaimed", async t => {
   const f = fixture(t);
   await f.finish();

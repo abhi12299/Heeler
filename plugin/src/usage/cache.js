@@ -1,16 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export const DAY = 86_400_000;
 export const RETENTION = 31 * DAY;
+/** `~/.claude-<name>` directories holding Transcripts: other Claude Code accounts, run with CLAUDE_CONFIG_DIR. */
+function claudeAccountDirectories(home) {
+  try {
+    return readdirSync(home).filter(name => name.startsWith(".claude-") && existsSync(join(home, name, "projects"))).map(name => join(home, name));
+  } catch { return []; }
+}
 export function usageRoots(runtime) {
   const env = runtime.env;
   const home = env.HOME;
   const absolute = value => resolve(home, value);
   return {
-    claude: [...new Set([env.CLAUDE_CONFIG_DIR, join(home, ".claude"), join(env.XDG_CONFIG_HOME || join(home, ".config"), "claude")].filter(Boolean).map(absolute))].sort(),
+    claude: [...new Set([env.CLAUDE_CONFIG_DIR, join(home, ".claude"), join(env.XDG_CONFIG_HOME || join(home, ".config"), "claude"),
+      ...claudeAccountDirectories(home)].filter(Boolean).map(absolute))].sort(),
     codex: [absolute(env.CODEX_HOME || join(home, ".codex"))],
   };
 }
