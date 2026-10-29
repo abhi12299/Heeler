@@ -4,11 +4,13 @@ import Speech
 // SPDX-License-Identifier: Apache-2.0
 
 /// Dictation through Apple's Speech framework, on device where the language
-/// supports it. Recording borrows the shared audio session; when it ends the
-/// session returns to silent playback and ``audioSessionReleased`` tells the
-/// Background Alerts keep-alive to resume.
+/// supports it. Recording borrows the shared audio session
+/// (``audioSessionBorrowed`` holds the Background Alerts keep-alive off it);
+/// when it ends the session returns to silent playback and
+/// ``audioSessionReleased`` tells the keep-alive to resume.
 @MainActor
 final class SpeechDictationEngine: DictationEngine {
+    static let audioSessionBorrowed = Notification.Name("SpeechDictationEngine.audioSessionBorrowed")
     static let audioSessionReleased = Notification.Name("SpeechDictationEngine.audioSessionReleased")
 
     private var audioEngine: AVAudioEngine?
@@ -26,6 +28,7 @@ final class SpeechDictationEngine: DictationEngine {
         tearDown()
 
         do {
+            NotificationCenter.default.post(name: Self.audioSessionBorrowed, object: nil)
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(
                 .playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker])
@@ -53,7 +56,8 @@ final class SpeechDictationEngine: DictationEngine {
             }
             return stream
         } catch {
-            tearDown()
+            // Nothing was kept to tear down, but the session was borrowed.
+            releaseSession()
             throw DictationError.unavailable
         }
     }
@@ -73,6 +77,10 @@ final class SpeechDictationEngine: DictationEngine {
         audioEngine = nil
         request = nil
         task = nil
+        releaseSession()
+    }
+
+    private func releaseSession() {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         NotificationCenter.default.post(name: Self.audioSessionReleased, object: nil)

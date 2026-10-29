@@ -21,6 +21,13 @@ enum BackgroundAlerts {
             false
         #endif
     }
+
+    /// The free build's stdout diagnostics, read with `devicectl --console`.
+    static func note(_ message: String) {
+        #if HEELER_FREE_BUILD
+            print("[BackgroundAlerts] \(message)")
+        #endif
+    }
 }
 
 /// A local notification's content and tap target, kept as plain values so
@@ -58,6 +65,15 @@ enum LocalAgentNotification {
         else { return nil }
         return AgentNotificationTarget(hostID: host, paneID: pane)
     }
+
+    /// Posted while the process is still alive, once it is about to stop
+    /// listening: without it, a frozen app looks exactly like quiet Agents.
+    static let pausedNotice = Request(
+        identifier: "heeler:paused",
+        title: "Heeler paused",
+        body: "Alerts are off until you open it.",
+        threadIdentifier: "heeler:paused",
+        userInfo: [:])
 }
 
 /// The user's switch, on by default: the point of the free build's alerts is
@@ -83,6 +99,8 @@ final class BackgroundAlertsSettings {
 @MainActor
 protocol BackgroundKeepAlive: AnyObject {
     var isRunning: Bool { get }
+    /// Called when the keep-alive stopped and could not restart itself.
+    var onDrop: (@MainActor () -> Void)? { get set }
     func start()
     func stop()
 }
@@ -92,6 +110,7 @@ protocol BackgroundKeepAlive: AnyObject {
 protocol LocalNotificationPosting: AnyObject {
     func requestAuthorization()
     func post(_ request: LocalAgentNotification.Request)
+    func withdraw(identifier: String)
 }
 
 /// Decides, per transition, whether the free build's alert goes out as a
@@ -106,6 +125,10 @@ final class BackgroundAlertsController {
     @ObservationIgnored private let notifier: any LocalNotificationPosting
     @ObservationIgnored private let isAvailable: Bool
     @ObservationIgnored private var requestedAuthorization = false
+    @ObservationIgnored private var postedPausedNotice = false
+    /// Runs when the keep-alive drops while backgrounded, so the Host
+    /// connections get the grace-period teardown instead of freezing open.
+    @ObservationIgnored var onKeepAliveLost: (@MainActor () -> Void)?
 
     init(
         settings: BackgroundAlertsSettings = .shared,
@@ -117,6 +140,7 @@ final class BackgroundAlertsController {
         self.keepAlive = keepAlive
         self.notifier = notifier
         self.isAvailable = isAvailable
+        keepAlive.onDrop = { [weak self] in self?.keepAliveDidDrop() }
     }
 
     private var isOn: Bool { isAvailable && settings.isEnabled }
@@ -125,12 +149,31 @@ final class BackgroundAlertsController {
     /// in the background only if its audio was already playing when it left.
     func sceneDidBecomeActive() {
         isInBackground = false
+        if postedPausedNotice {
+            postedPausedNotice = false
+            notifier.withdraw(identifier: LocalAgentNotification.pausedNotice.identifier)
+        }
         settingsDidChange()
     }
 
     func sceneDidEnterBackground() {
         isInBackground = true
         note("backgrounded; keeping connections: \(keepsConnectionsInBackground)")
+    }
+
+    /// The Host connections are about to be torn down for this background
+    /// trip. Says so once, while the process can still post.
+    func connectionsWillPause() {
+        guard isOn, isInBackground, !postedPausedNotice else { return }
+        postedPausedNotice = true
+        notifier.post(LocalAgentNotification.pausedNotice)
+        note("posted paused notice")
+    }
+
+    private func keepAliveDidDrop() {
+        note("keep-alive dropped (background: \(isInBackground))")
+        guard isOn, isInBackground else { return }
+        onKeepAliveLost?()
     }
 
     /// Applies the switch: arm on, disarm off.
@@ -171,12 +214,7 @@ final class BackgroundAlertsController {
         return true
     }
 
-    /// The free build's stdout diagnostics, read with `devicectl --console`.
-    private func note(_ message: String) {
-        #if HEELER_FREE_BUILD
-            print("[BackgroundAlerts] \(message)")
-        #endif
-    }
+    private func note(_ message: String) { BackgroundAlerts.note(message) }
 }
 
 /// `UNUserNotificationCenter`, reduced to the two calls Background Alerts
@@ -199,95 +237,230 @@ final class UserNotificationPoster: LocalNotificationPosting {
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: request.identifier, content: content, trigger: nil))
     }
+
+    func withdraw(identifier: String) {
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
+    }
+}
+
+/// The silence the keep-alive plays, reduced to what its recovery needs so
+/// that recovery can be tested without a live audio session.
+@MainActor
+protocol SilentAudioOutput: AnyObject {
+    /// Whether silence is reaching the output now: the engine and its player
+    /// both running, not merely asked to.
+    var isPlaying: Bool { get }
+    func play() throws
+    /// Stops playback but keeps the session active: a backgrounded app cannot
+    /// activate it again.
+    func halt()
+    func deactivate()
 }
 
 /// Plays silence through a mixable playback session, which keeps the process
 /// running in the background under the `audio` background mode without
-/// interrupting anything else the user is listening to. An interruption (a
-/// call, Siri) stops the engine; it is restarted when the interruption ends
-/// and after a media-services reset.
+/// interrupting anything else the user is listening to.
+///
+/// iOS stops the engine without asking (an interruption, a route or
+/// configuration change, a media-services reset) and then freezes the app
+/// once nothing plays, so running is read from the output itself, every such
+/// event restarts it, and a periodic health check catches whatever no
+/// notification announced. A restart that fails reports `onDrop`.
 @MainActor
 final class SilentAudioKeepAlive: BackgroundKeepAlive {
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
+    static let defaultHealthCheckInterval: Duration = .seconds(5)
+
+    /// The audio-session notifications the keep-alive reacts to, as values.
+    enum Event: Equatable, Sendable {
+        case interruptionBegan
+        case interruptionEnded
+        case mediaServicesReset
+        case routeChanged
+        case engineReconfigured
+        case sessionLent
+        case sessionReturned
+    }
+
+    var onDrop: (@MainActor () -> Void)?
+    private let output: any SilentAudioOutput
+    private let healthCheckInterval: Duration?
     private var observers: [NSObjectProtocol] = []
+    private var healthCheck: Task<Void, Never>?
     private var wanted = false
+    /// The system holds the session until the interruption ends. A failed
+    /// restart meanwhile is expected, not a drop.
+    private var interrupted = false
+    /// Dictation is recording on the shared session; playing now would take
+    /// it back from under the microphone.
+    private var lent = false
 
-    private(set) var isRunning = false
+    var isRunning: Bool { output.isPlaying }
 
-    init() {
-        engine.attach(player)
-        let center = NotificationCenter.default
-        observers.append(
-            center.addObserver(
-                forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
-            ) { [weak self] notification in
-                let type = (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
-                    .flatMap(AVAudioSession.InterruptionType.init(rawValue:))
-                MainActor.assumeIsolated {
-                    if type == .began {
-                        self?.isRunning = false
-                    } else if type == .ended {
-                        self?.restartIfWanted()
-                    }
-                }
-            })
-        observers.append(
-            center.addObserver(
-                forName: AVAudioSession.mediaServicesWereResetNotification, object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.restartIfWanted() }
-            })
-        // Dictation borrows the shared session for recording and hands it
-        // back as silent playback.
-        observers.append(
-            center.addObserver(
-                forName: SpeechDictationEngine.audioSessionReleased, object: nil, queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.restartIfWanted() }
-            })
+    /// `healthCheckInterval` nil runs no periodic check, for tests.
+    init(
+        output: any SilentAudioOutput = AVAudioEngineSilence(),
+        healthCheckInterval: Duration? = SilentAudioKeepAlive.defaultHealthCheckInterval
+    ) {
+        self.output = output
+        self.healthCheckInterval = healthCheckInterval
+        let names: [Notification.Name] = [
+            AVAudioSession.interruptionNotification,
+            AVAudioSession.mediaServicesWereResetNotification,
+            AVAudioSession.routeChangeNotification,
+            .AVAudioEngineConfigurationChange,
+            SpeechDictationEngine.audioSessionBorrowed,
+            SpeechDictationEngine.audioSessionReleased,
+        ]
+        for name in names {
+            observers.append(
+                NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {
+                    [weak self] notification in
+                    guard let event = Self.event(for: notification) else { return }
+                    MainActor.assumeIsolated { self?.handle(event) }
+                })
+        }
+    }
+
+    nonisolated static func event(for notification: Notification) -> Event? {
+        switch notification.name {
+        case AVAudioSession.interruptionNotification:
+            let type = (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                .flatMap(AVAudioSession.InterruptionType.init(rawValue:))
+            return switch type {
+            case .began?: .interruptionBegan
+            case .ended?: .interruptionEnded
+            default: nil
+            }
+        case AVAudioSession.mediaServicesWereResetNotification: return .mediaServicesReset
+        case AVAudioSession.routeChangeNotification: return .routeChanged
+        case .AVAudioEngineConfigurationChange: return .engineReconfigured
+        case SpeechDictationEngine.audioSessionBorrowed: return .sessionLent
+        case SpeechDictationEngine.audioSessionReleased: return .sessionReturned
+        default: return nil
+        }
     }
 
     func start() {
         wanted = true
-        guard !isRunning else { return }
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
-            let format = engine.mainMixerNode.outputFormat(forBus: 0)
-            engine.connect(player, to: engine.mainMixerNode, format: format)
-            engine.mainMixerNode.outputVolume = 0
-            guard
-                let silence = AVAudioPCMBuffer(
-                    pcmFormat: format, frameCapacity: AVAudioFrameCount(format.sampleRate))
-            else { return }
-            // A fresh buffer is zero-filled: one second of silence, looped.
-            silence.frameLength = silence.frameCapacity
-            if !engine.isRunning { try engine.start() }
-            player.scheduleBuffer(silence, at: nil, options: .loops)
-            player.play()
-            isRunning = true
-        } catch {
-            isRunning = false
-        }
+        startHealthChecks()
+        guard !isRunning, !lent else { return }
+        play()
     }
 
     func stop() {
+        let wasWanted = wanted
         wanted = false
-        guard isRunning || engine.isRunning else { return }
-        player.stop()
-        engine.stop()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        isRunning = false
+        healthCheck?.cancel()
+        healthCheck = nil
+        guard wasWanted || isRunning else { return }
+        output.halt()
+        if !lent { output.deactivate() }
     }
 
-    private func restartIfWanted() {
-        guard wanted else { return }
-        isRunning = false
+    func handle(_ event: Event) {
+        switch event {
+        case .interruptionBegan:
+            interrupted = true
+            note("interrupted")
+        case .interruptionEnded:
+            // Restarted whether or not iOS offers `.shouldResume`: without
+            // the audio the app is frozen and every alert is lost.
+            interrupted = false
+            restart(after: "interruption ended")
+        case .mediaServicesReset:
+            restart(after: "media services reset")
+        case .engineReconfigured:
+            restart(after: "engine configuration change")
+        case .routeChanged:
+            checkHealth(after: "route change")
+        case .sessionLent:
+            lent = true
+            note("session lent to dictation")
+        case .sessionReturned:
+            lent = false
+            restart(after: "dictation returned the session")
+        }
+    }
+
+    /// Restarts the keep-alive if it should be playing and is not.
+    func checkHealth(after reason: String = "health check") {
+        guard wanted, !isRunning else { return }
+        restart(after: reason)
+    }
+
+    private func restart(after reason: String) {
+        guard wanted, !lent else { return }
+        output.halt()
+        play()
+        note("restarted after \(reason); running: \(isRunning)")
+        if !isRunning, !interrupted { onDrop?() }
+    }
+
+    private func play() {
+        do {
+            try output.play()
+        } catch {
+            note("keep-alive could not play: \(error.localizedDescription)")
+        }
+        if isRunning { interrupted = false }
+    }
+
+    private func startHealthChecks() {
+        guard let interval = healthCheckInterval, healthCheck == nil else { return }
+        healthCheck = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard let self else { return }
+                checkHealth()
+            }
+        }
+    }
+
+    private func note(_ message: String) { BackgroundAlerts.note(message) }
+}
+
+/// One second of silence, looped through a muted `AVAudioEngine` on a
+/// mixable playback session.
+@MainActor
+final class AVAudioEngineSilence: SilentAudioOutput {
+    enum Failure: Error {
+        /// The output route has no format yet; connecting to it would raise.
+        case noOutputFormat
+    }
+
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+
+    init() {
+        engine.attach(player)
+    }
+
+    var isPlaying: Bool { engine.isRunning && player.isPlaying }
+
+    func play() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try session.setActive(true)
+        let format = engine.mainMixerNode.outputFormat(forBus: 0)
+        guard format.sampleRate > 0,
+            let silence = AVAudioPCMBuffer(
+                pcmFormat: format, frameCapacity: AVAudioFrameCount(format.sampleRate))
+        else { throw Failure.noOutputFormat }
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        engine.mainMixerNode.outputVolume = 0
+        // A fresh buffer is zero-filled: one second of silence, looped.
+        silence.frameLength = silence.frameCapacity
+        if !engine.isRunning { try engine.start() }
+        player.scheduleBuffer(silence, at: nil, options: .loops)
+        player.play()
+    }
+
+    func halt() {
         player.stop()
         engine.stop()
-        start()
+    }
+
+    func deactivate() {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }

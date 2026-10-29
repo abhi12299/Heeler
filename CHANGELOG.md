@@ -35,6 +35,9 @@ Entries reference the issue that motivated them.
   Heeler stays running in the background on a silent, mixable audio session
   and posts Agent Notifications itself when an Agent finishes or needs input.
   On by default under Settings > Notifications; tapping one opens the Agent.
+  The silent audio restarts itself after a call, Siri, a route change or an
+  audio reset, and if it still cannot run, Heeler posts one "Heeler paused"
+  notification before it stops listening.
 - Custom Agents: start an Agent through your own shell alias or function
   (for example `cg`) from New Agent. The app types the command into the new
   pane's shell, where your aliases exist, then names the Agent herdr detects.
