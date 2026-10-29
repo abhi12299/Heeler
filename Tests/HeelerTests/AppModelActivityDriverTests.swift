@@ -77,15 +77,6 @@ struct AppModelActivityDriverTests {
     /// while their keep-alive holds the process awake, backgrounding must
     /// leave the connections up: no grace period, no teardown.
     @Test func backgroundAlertsKeepTheConsoleConnectedInTheBackground() async throws {
-        final class AwakeKeepAlive: BackgroundKeepAlive {
-            var isRunning = false
-            func start() { isRunning = true }
-            func stop() { isRunning = false }
-        }
-        final class SilentNotifier: LocalNotificationPosting {
-            func requestAuthorization() {}
-            func post(_ request: LocalAgentNotification.Request) {}
-        }
         let host = Host.fixture()
         let transport = ScriptedTransport(snapshot: .fixture())
         let console = ConsoleStore(snapshotRetryDelay: .milliseconds(10)) { _, subscriptions in
@@ -123,6 +114,56 @@ struct AppModelActivityDriverTests {
 
         #expect(console.hostStatuses[host.id] == .connected)
         #expect(granter.beginTokens.isEmpty)
+        console.setHosts([])
+    }
+
+    /// A keep-alive that dies after the app backgrounded with its
+    /// connections up must not leave them to freeze open: the grace-period
+    /// teardown starts, and the user is told once that alerts stopped.
+    @Test func aKeepAliveLostInTheBackgroundPausesTheConsoleAndSaysSo() async throws {
+        let host = Host.fixture()
+        let transport = ScriptedTransport(snapshot: .fixture())
+        let console = ConsoleStore(snapshotRetryDelay: .milliseconds(10)) { _, subscriptions in
+            EventsSession(
+                subscriptions: subscriptions,
+                connect: { transport },
+                reconnectPolicy: ReconnectPolicy(
+                    initialDelay: .milliseconds(10), multiplier: 2,
+                    maxDelay: .milliseconds(50)),
+                keepalive: .default)
+        }
+        let granter = RecordingBackgroundExecutionGranter()
+        let suite = "app-model-keep-alive-lost-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let keepAlive = AwakeKeepAlive()
+        let notifier = SilentNotifier()
+        let app = HeelerAppModel(
+            pushRegistration: PushRegistrationStore(
+                client: ScriptedPushRegistrationClient(), environment: .sandbox),
+            sceneDirectory: AgentSceneDirectory(),
+            hostStore: HostStore(volatileHosts: [host]),
+            console: console,
+            activity: AppActivityCoordinator(gracePeriod: .milliseconds(50), granter: granter),
+            backgroundAlerts: BackgroundAlertsController(
+                settings: BackgroundAlertsSettings(defaults: defaults),
+                keepAlive: keepAlive, notifier: notifier, isAvailable: true))
+        app.start()
+        try await waitUntil("the injected Host should come up connected") {
+            console.hostStatuses[host.id] == .connected
+        }
+        app.scenePhaseDidChange(.background)
+        #expect(granter.beginTokens.isEmpty)
+
+        keepAlive.isRunning = false
+        keepAlive.onDrop?()
+        keepAlive.onDrop?()
+
+        try await waitUntil("the grace period should tear the connection down") {
+            console.hostStatuses[host.id] == .suspended
+        }
+        #expect(granter.beginTokens.count == 1)
+        #expect(notifier.posted == [LocalAgentNotification.pausedNotice])
         console.setHosts([])
     }
 
@@ -182,6 +223,20 @@ struct AppModelActivityDriverTests {
 /// driver hand the assertion back (`didFinishSuspending`) once the Console's
 /// teardown has returned.
 @MainActor
+private final class AwakeKeepAlive: BackgroundKeepAlive {
+    var isRunning = false
+    var onDrop: (@MainActor () -> Void)?
+    func start() { isRunning = true }
+    func stop() { isRunning = false }
+}
+
+private final class SilentNotifier: LocalNotificationPosting {
+    private(set) var posted: [LocalAgentNotification.Request] = []
+    func requestAuthorization() {}
+    func post(_ request: LocalAgentNotification.Request) { posted.append(request) }
+    func withdraw(identifier: String) {}
+}
+
 private final class RecordingBackgroundExecutionGranter: BackgroundExecutionGranting {
     private(set) var beginTokens: [BackgroundExecutionToken] = []
     private(set) var endedTokens: [BackgroundExecutionToken] = []

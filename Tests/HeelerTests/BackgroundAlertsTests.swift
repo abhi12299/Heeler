@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 
@@ -11,6 +12,7 @@ import Testing
 struct BackgroundAlertsTests {
     private final class FakeKeepAlive: BackgroundKeepAlive {
         var isRunning = false
+        var onDrop: (@MainActor () -> Void)?
         var starts = 0
         var stops = 0
         /// A refused audio session: start runs but nothing plays.
@@ -30,9 +32,32 @@ struct BackgroundAlertsTests {
     private final class FakeNotifier: LocalNotificationPosting {
         var authorizationRequests = 0
         var posted: [LocalAgentNotification.Request] = []
+        var withdrawn: [String] = []
 
         func requestAuthorization() { authorizationRequests += 1 }
         func post(_ request: LocalAgentNotification.Request) { posted.append(request) }
+        func withdraw(identifier: String) { withdrawn.append(identifier) }
+    }
+
+    /// Silent audio that iOS can stop behind the keep-alive's back.
+    private final class FakeOutput: SilentAudioOutput {
+        var isPlaying = false
+        var plays = 0
+        var deactivations = 0
+        /// The session refuses to play, as it does mid-call or once the
+        /// app is backgrounded with the session inactive.
+        var refuses = false
+
+        struct Refused: Error {}
+
+        func play() throws {
+            plays += 1
+            if refuses { throw Refused() }
+            isPlaying = true
+        }
+
+        func halt() { isPlaying = false }
+        func deactivate() { deactivations += 1 }
     }
 
     private let keepAlive = FakeKeepAlive()
@@ -111,6 +136,177 @@ struct BackgroundAlertsTests {
 
         #expect(keepAlive.starts == 1)
         #expect(!controller.keepsConnectionsInBackground)
+    }
+
+    /// Losing the connections is said once per background trip, while the
+    /// process can still post, and the notice goes away on return.
+    @Test func aPauseIsAnnouncedOncePerBackgroundTrip() {
+        keepAlive.refuses = true
+        let controller = makeController()
+        controller.sceneDidBecomeActive()
+
+        controller.sceneDidEnterBackground()
+        controller.connectionsWillPause()
+        controller.connectionsWillPause()
+        #expect(notifier.posted == [LocalAgentNotification.pausedNotice])
+
+        controller.sceneDidBecomeActive()
+        #expect(notifier.withdrawn == [LocalAgentNotification.pausedNotice.identifier])
+        controller.sceneDidEnterBackground()
+        controller.connectionsWillPause()
+        #expect(notifier.posted.count == 2)
+    }
+
+    /// With the switch off the user chose silence; there is nothing to warn
+    /// about.
+    @Test func noPauseNoticeWhileTheSwitchIsOff() {
+        let controller = makeController(settings: makeSettings(enabled: false))
+        controller.sceneDidBecomeActive()
+        controller.sceneDidEnterBackground()
+        controller.connectionsWillPause()
+
+        #expect(notifier.posted.isEmpty)
+    }
+
+    @Test func aKeepAliveDroppedInTheBackgroundAsksForTheTeardown() {
+        let controller = makeController()
+        var lost = 0
+        controller.onKeepAliveLost = { lost += 1 }
+        controller.sceneDidBecomeActive()
+
+        keepAlive.onDrop?()
+        #expect(lost == 0)
+
+        controller.sceneDidEnterBackground()
+        keepAlive.isRunning = false
+        keepAlive.onDrop?()
+        #expect(lost == 1)
+        #expect(!controller.keepsConnectionsInBackground)
+    }
+
+    @Test func runningIsReadFromTheOutputNotRemembered() {
+        let output = FakeOutput()
+        let keepAlive = SilentAudioKeepAlive(output: output, healthCheckInterval: nil)
+        keepAlive.start()
+        #expect(keepAlive.isRunning)
+
+        // iOS stopped the engine and said nothing.
+        output.isPlaying = false
+        #expect(!keepAlive.isRunning)
+
+        keepAlive.checkHealth()
+        #expect(keepAlive.isRunning)
+        #expect(output.plays == 2)
+    }
+
+    /// iOS may end an interruption without `.shouldResume`; the keep-alive
+    /// restarts anyway, and a failed restart mid-interruption is no drop.
+    @Test func anEndedInterruptionRestartsWithoutShouldResume() throws {
+        let output = FakeOutput()
+        let keepAlive = SilentAudioKeepAlive(output: output, healthCheckInterval: nil)
+        var drops = 0
+        keepAlive.onDrop = { drops += 1 }
+        keepAlive.start()
+
+        keepAlive.handle(.interruptionBegan)
+        output.isPlaying = false
+        output.refuses = true
+        keepAlive.checkHealth()
+        #expect(drops == 0)
+
+        output.refuses = false
+        let ended = Notification(
+            name: AVAudioSession.interruptionNotification, object: nil,
+            userInfo: [
+                AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue
+            ])
+        keepAlive.handle(try #require(SilentAudioKeepAlive.event(for: ended)))
+        #expect(keepAlive.isRunning)
+        #expect(drops == 0)
+    }
+
+    @Test func aConfigurationChangeRestartsAndARouteChangeOnlyWhenDead() {
+        let output = FakeOutput()
+        let keepAlive = SilentAudioKeepAlive(output: output, healthCheckInterval: nil)
+        keepAlive.start()
+
+        keepAlive.handle(.routeChanged)
+        #expect(output.plays == 1)
+
+        keepAlive.handle(.engineReconfigured)
+        #expect(output.plays == 2)
+
+        output.isPlaying = false
+        keepAlive.handle(.routeChanged)
+        #expect(output.plays == 3)
+        #expect(keepAlive.isRunning)
+    }
+
+    @Test func aRestartThatFailsReportsADrop() {
+        let output = FakeOutput()
+        let keepAlive = SilentAudioKeepAlive(output: output, healthCheckInterval: nil)
+        var drops = 0
+        keepAlive.onDrop = { drops += 1 }
+        keepAlive.start()
+
+        output.isPlaying = false
+        output.refuses = true
+        keepAlive.handle(.engineReconfigured)
+
+        #expect(drops == 1)
+    }
+
+    /// Dictation records on the shared session; playing over it would take
+    /// the microphone away mid-sentence.
+    @Test func aLentSessionIsLeftAloneUntilReturned() {
+        let output = FakeOutput()
+        let keepAlive = SilentAudioKeepAlive(output: output, healthCheckInterval: nil)
+        keepAlive.start()
+
+        keepAlive.handle(.sessionLent)
+        output.isPlaying = false
+        keepAlive.handle(.engineReconfigured)
+        keepAlive.handle(.routeChanged)
+        keepAlive.checkHealth()
+        #expect(output.plays == 1)
+
+        keepAlive.handle(.sessionReturned)
+        #expect(keepAlive.isRunning)
+        #expect(output.plays == 2)
+    }
+
+    @Test func aStoppedKeepAliveStaysStopped() {
+        let output = FakeOutput()
+        let keepAlive = SilentAudioKeepAlive(output: output, healthCheckInterval: nil)
+        keepAlive.start()
+        keepAlive.stop()
+
+        keepAlive.handle(.interruptionEnded)
+        keepAlive.handle(.mediaServicesReset)
+        keepAlive.checkHealth()
+
+        #expect(!keepAlive.isRunning)
+        #expect(output.plays == 1)
+        #expect(output.deactivations == 1)
+    }
+
+    @Test func theAudioNotificationsMapToEvents() {
+        func event(_ name: Notification.Name, _ userInfo: [AnyHashable: Any]? = nil)
+            -> SilentAudioKeepAlive.Event?
+        {
+            SilentAudioKeepAlive.event(
+                for: Notification(name: name, object: nil, userInfo: userInfo))
+        }
+        let began = [
+            AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
+        ]
+        #expect(event(AVAudioSession.interruptionNotification, began) == .interruptionBegan)
+        #expect(event(AVAudioSession.interruptionNotification) == nil)
+        #expect(event(AVAudioSession.routeChangeNotification) == .routeChanged)
+        #expect(event(.AVAudioEngineConfigurationChange) == .engineReconfigured)
+        #expect(event(AVAudioSession.mediaServicesWereResetNotification) == .mediaServicesReset)
+        #expect(event(SpeechDictationEngine.audioSessionBorrowed) == .sessionLent)
+        #expect(event(SpeechDictationEngine.audioSessionReleased) == .sessionReturned)
     }
 
     @Test func aStoreBuildNeverArmsOrDelivers() {

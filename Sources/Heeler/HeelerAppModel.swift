@@ -118,6 +118,7 @@ final class HeelerAppModel {
                 console?.pins.pinnedPaneIDs(for: id) ?? []
             },
             rowLayout: { [weak console] id in console?.rowLayout(for: id) })
+        backgroundAlerts.onKeepAliveLost = { [weak self] in self?.pauseConnectionsInBackground() }
     }
 
     var terminal: TerminalSettings {
@@ -183,11 +184,19 @@ final class HeelerAppModel {
             // connections must survive backgrounding: the event stream is
             // what the alerts come from. Otherwise the grace period applies.
             if !backgroundAlerts.keepsConnectionsInBackground {
-                activity.didEnterBackground()
+                pauseConnectionsInBackground()
             }
         default:
             break
         }
+    }
+
+    /// Starts the grace-period teardown, announcing it first while the
+    /// process can still post. Also runs when the keep-alive drops after the
+    /// app has already backgrounded with its connections up.
+    private func pauseConnectionsInBackground() {
+        backgroundAlerts.connectionsWillPause()
+        activity.didEnterBackground()
     }
 
     /// Store-to-store wiring that used to hang off the single window's view.
