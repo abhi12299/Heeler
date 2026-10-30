@@ -115,6 +115,12 @@ struct KeychainSecretStore: SecretStore {
 
     func removeSecret(account: String) throws {
         let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+        #if HEELER_FREE_BUILD
+            // The free build is signed without app groups, so it holds nothing
+            // in the shared access group and iOS refuses to look there. That
+            // refusal must not block removing a Host.
+            if accessGroup != nil, status == errSecMissingEntitlement { return }
+        #endif
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError.unexpectedStatus(status)
         }
