@@ -412,22 +412,18 @@ actor HeelerSSHTransport: Transport {
     static func connect(settings: SSHTransportSettings) async throws -> HeelerSSHTransport {
         let gate = HostKeyVerificationGate()
         let connection: SSHConnection
-        let route: SSHRoute
-        if settings.routes.count == 1, let only = settings.routes.first {
-            connection = try await reach(only, settings: settings, gate: gate)
-            route = only
+        let routeID: UUID?
+        if settings.routes.count == 1, let route = settings.routes.first {
+            connection = try await reach(route, settings: settings, gate: gate)
+            routeID = route.id
         } else {
             let won = try await race(settings: settings, gate: gate)
             connection = won.connection
-            route = settings.routes[won.index]
+            routeID = settings.routes[won.index].id
         }
-        let routeID = route.id
         do {
-            // The winning route's address is the one a Tailscale SSH check
-            // prompt names, since that is the machine tailscaled guards.
             try await authenticate(
                 connection,
-                host: route.host,
                 username: settings.username,
                 credentials: settings.credentials,
                 timeout: settings.requestTimeout)
@@ -619,7 +615,6 @@ actor HeelerSSHTransport: Transport {
             try await gate.withLock { try await verifier.verify(connection.hostKey) }
             try await authenticate(
                 connection,
-                host: endpoint.host,
                 username: username,
                 credentials: credentials,
                 timeout: timeout)
@@ -655,14 +650,11 @@ actor HeelerSSHTransport: Transport {
 
     private static func authenticate(
         _ connection: SSHConnection,
-        host: String,
         username: String,
         credentials: SSHCredentials,
         timeout: Duration
     ) async throws {
         switch credentials {
-        case .tailnetIdentity:
-            try await authenticateTailnetIdentity(connection, host: host, username: username)
         case .password(let password):
             try await connection.authenticate(
                 username: username,
@@ -687,40 +679,6 @@ actor HeelerSSHTransport: Transport {
                 // this can only mean no RSA-SHA2-512 signature was possible.
                 throw TransportError.rsaSignatureUnsupported
             }
-        }
-    }
-
-    /// Tailscale SSH `none` authentication. A `check` login URL is surfaced
-    /// app-wide while tailscaled holds the request; a refusal is reported in
-    /// tailscaled's own words when it gave any.
-    private static func authenticateTailnetIdentity(
-        _ connection: SSHConnection,
-        host: String,
-        username: String
-    ) async throws {
-        let attempt = UUID()
-        let banners = TailscaleBannerLog()
-        defer {
-            Task { @MainActor in TailscaleCheckPrompts.shared.finish(attempt) }
-        }
-        do {
-            try await connection.authenticateNone(
-                username: username,
-                timeout: TailscaleSSH.authenticationBudget
-            ) { banner in
-                banners.append(banner)
-                guard let url = TailscaleSSH.loginURL(inBanner: banner) else { return }
-                Task { @MainActor in
-                    TailscaleCheckPrompts.shared.present(
-                        .init(id: attempt, host: host, url: url))
-                }
-            }
-        } catch SSHError.authenticationFailed {
-            if let banner = banners.last {
-                throw TransportError.tailscaleSSHDenied(
-                    message: TailscaleSSH.denialMessage(fromBanner: banner))
-            }
-            throw SSHError.authenticationFailed
         }
     }
 

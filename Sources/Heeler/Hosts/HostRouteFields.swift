@@ -80,8 +80,6 @@ struct HostRouteFields: View {
                 "Both machines must authorize the RSA Key."
             case .password:
                 "Both machines must accept the same password; separate passwords are not supported."
-            case .tailscale:
-                "Both machines must run Tailscale SSH and allow this device."
             }
         return "The Host's Address and Port are resolved from the Jump Host, usually through "
             + "a loopback-only reverse tunnel. \(credentialRequirement) You confirm each "

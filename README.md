@@ -154,10 +154,12 @@ so form encoding (such as JavaScript's `URLSearchParams`) misses a name like
 `Build Box`. When no saved Host on that session matches, or more than one
 does, the link opens the Console.
 
-## This fork: free Apple ID build and Tailscale SSH
+## This fork: free Apple ID build
 
-This fork ([abhi12299/Heeler](https://github.com/abhi12299/Heeler)) adds two
-things upstream does not ship.
+This fork ([abhi12299/Heeler](https://github.com/abhi12299/Heeler)) adds a few
+things upstream does not ship. To reach a Host over Tailscale, use upstream's
+[Overlay Networks](docs/guides/tailscale.md); the fork's own Tailscale SSH Host
+mode has been removed.
 
 ### Free Apple ID build
 
@@ -200,38 +202,6 @@ to the Host's home). If the command starts no Agent within 15 seconds, the
 launch fails and shows what the shell printed (for example
 `command not found`). The picker offers each profile wherever the Agent it
 starts is installed.
-
-### Tailscale SSH Hosts
-
-A machine with [Tailscale SSH](https://tailscale.com/kb/1193/tailscale-ssh)
-on (`tailscale set --ssh`) can be a Host with no OpenSSH server at all — on
-macOS, Remote Login can stay off. tailscaled answers port 22 on the machine's
-tailnet addresses and authorizes by the phone's tailnet identity and your
-tailnet policy, so nothing is enrolled on the machine.
-
-- **Add by hand:** Add Host, address = tailnet IP or MagicDNS name, port 22,
-  user = your account on the machine, method **Tailscale SSH**. Trust the host
-  key on first connect: it is tailscaled's own key, reached over the
-  WireGuard-authenticated tailnet.
-- **Or pair:** install this fork's plugin and invoke the pairing action:
-
-  ```bash
-  herdr plugin install abhi12299/Heeler/plugin --ref main --yes
-  herdr plugin action invoke heeler.pair
-  ```
-
-  On a machine with Tailscale SSH serving and no OpenSSH host key, the popup
-  shows a Tailscale SSH Pairing Code (force it with `"auth": "tailscale"` in
-  `pair.json`). The code holds only the addresses and the user — no key, no
-  expiry.
-
-If your tailnet policy uses `check` mode, Heeler shows a **Tailscale SSH
-check** card with the login link while tailscaled holds the connection.
-Approve it in the browser and the connection continues; one approval lasts
-for the policy's check period. The policy must allow your account as the SSH
-user (`"users": ["<you>"]`) and must not disable forwarding: Heeler reaches
-herdr's socket through stream-local forwarding, which Tailscale SSH permits
-inside your home directory.
 
 ## Stack
 

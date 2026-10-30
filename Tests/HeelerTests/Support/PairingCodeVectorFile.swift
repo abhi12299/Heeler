@@ -20,10 +20,7 @@ struct PairingCodeVectorFile: Decodable, Sendable {
         let addresses: [String]
         let port: Int
         let username: String
-        /// Absent only on a Tailscale SSH code.
-        let hostKeyFingerprint: String?
-        /// The wire `auth` value; absent on an OpenSSH code.
-        let auth: String?
+        let hostKeyFingerprint: String
         /// Raw 32-byte Bootstrap Key seed as unpadded base64url (wire encoding).
         let bootstrapSeed: String?
         let expiresAt: Int?

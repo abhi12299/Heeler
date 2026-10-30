@@ -1161,11 +1161,6 @@ indirect enum TransportError: Error, Sendable, Equatable {
     /// The Host rejected our credentials (key not authorized, wrong
     /// password, or the offered auth method is unavailable).
     case authenticationFailed
-    /// Tailscale SSH refused the connection on tailnet policy grounds and
-    /// said why in an auth banner ("tailnet policy does not permit you to SSH
-    /// as user …"). Carries tailscaled's own words: the fix is in the tailnet
-    /// ACL, not in anything stored on this device.
-    case tailscaleSSHDenied(message: String)
     /// The device's stored Ed25519 private key cannot be decoded. Reconnecting
     /// cannot repair it; the user must explicitly replace the Device Key.
     case deviceKeyCorrupt
@@ -1267,7 +1262,7 @@ indirect enum TransportError: Error, Sendable, Equatable {
         case .sshUnreachable, .timedOut, .cancelled, .channelFailed,
             .attachExited, .apiRejected:
             true
-        case .authenticationFailed, .tailscaleSSHDenied, .tcpForwardingUnavailable,
+        case .authenticationFailed, .tcpForwardingUnavailable,
             .deviceKeyCorrupt, .rsaKeyCorrupt, .rsaSignatureUnsupported,
             .hostKeyRejected, .hostKeyMismatch,
             .socketNotFound, .herdrBinaryNotFound, .herdrLauncherNotFound,

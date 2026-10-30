@@ -2609,10 +2609,7 @@ clear_simulator_environment
 
 if grep -q 'Suite "Session driver resource e2e" skipped' "$package_e2e_log" \
     || grep -q 'skipped:' "$package_e2e_log" \
-    || ! grep -q 'Test run with 83 tests in 5 suites passed' "$package_e2e_log" \
-    || ! grep -q \
-        'Test "none authentication declined by OpenSSH leaves the session for key auth" passed' \
-        "$package_e2e_log" \
+    || ! grep -q 'Test run with 82 tests in 5 suites passed' "$package_e2e_log" \
     || ! grep -q \
         'Test "one-shot exec resumes owned reads before other exchange operations" with 2 test cases passed' \
         "$package_e2e_log" \
