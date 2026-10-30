@@ -42,10 +42,6 @@ Entries reference the pull request that made the change.
   You can add arguments and environment variables; `~` and `$HOME` resolve to
   the Host's home.
   New Agent also reopens on the Agent you last started on that Host.
-- Tailscale SSH Hosts: choose Tailscale SSH as a Host's authentication method,
-  or scan a Tailscale SSH Pairing Code, to connect through tailscaled with no
-  OpenSSH server and nothing enrolled on the machine. A `check` policy's login
-  link appears in the app while the connection waits for approval.
 - `make free-install` builds and installs Heeler with a free Apple ID, without
   push notifications or Live Activities.
 - Pair a herdr that runs with its own config home, such as a per-project

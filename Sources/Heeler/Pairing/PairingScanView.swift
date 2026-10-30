@@ -49,7 +49,6 @@ struct PairingScanView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
-            .tailscaleCheckPrompt()
             .task { await resolveCameraAccess() }
             .onChange(of: store.pairedHost) { _, paired in
                 guard let paired else { return }
@@ -221,16 +220,7 @@ private struct PairingCeremonyView: View {
                 Text("Pairing")
             } footer: {
                 if store.failure == nil {
-                    if code.authorization == .tailscale {
-                        Text(
-                            "Tailscale SSH: your tailnet policy authorizes this device; nothing "
-                                + "is enrolled on the Host. "
-                                + (code.hostKeyFingerprint == nil
-                                    ? "The host key tailscaled presents is trusted over the tailnet."
-                                    : "Host key pinned from the Pairing Code."))
-                    } else {
-                        Text("Host key pinned from the Pairing Code — no fingerprint prompt.")
-                    }
+                    Text("Host key pinned from the Pairing Code — no fingerprint prompt.")
                 }
             }
 
@@ -257,10 +247,7 @@ private struct PairingCeremonyView: View {
     /// The steps this code's ceremony performs. A config-only code carries no
     /// Bootstrap Key: the Device Key reconnect is the whole ceremony.
     private var ceremonySteps: [PairingStep] {
-        if code.authorization == .tailscale {
-            return [.reach, .authenticate]
-        }
-        return code.bootstrap == nil
+        code.bootstrap == nil
             ? [.reach, .verify]
             : [.reach, .authenticate, .enroll, .verify]
     }
@@ -289,9 +276,7 @@ private struct PairingCeremonyView: View {
         switch step {
         case .parse: "Read the code"
         case .reach: "Reach the Host"
-        case .authenticate:
-            code.authorization == .tailscale
-                ? "Authorize through Tailscale" : "Authenticate with the Pairing Code"
+        case .authenticate: "Authenticate with the Pairing Code"
         case .enroll: "Enroll this device"
         case .verify: "Verify the new key"
         }

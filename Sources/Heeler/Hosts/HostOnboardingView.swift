@@ -220,7 +220,6 @@ struct HostOnboardingView: View {
         } message: {
             Text(sessionSelectionError ?? "")
         }
-        .tailscaleCheckPrompt()
         // A new store, after `adopt`, cancels the old one's checks.
         .task(id: ObjectIdentifier(store)) {
             if store.phase == .idle {
@@ -255,7 +254,6 @@ struct HostOnboardingView: View {
         case .deviceKey: "Device Key"
         case .rsaKey: "RSA Key"
         case .password: "Password"
-        case .tailscale: "Tailscale SSH"
         }
     }
 

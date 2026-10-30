@@ -58,12 +58,6 @@ extension TransportError {
                 summary: "Authentication failed",
                 detail: nil,
                 recoverySuggestion: "Update this Host's credentials or authorized key.")
-        case .tailscaleSSHDenied(let message):
-            TransportErrorPresentation(
-                summary: "Tailscale SSH refused the connection",
-                detail: message,
-                recoverySuggestion:
-                    "Check the ssh rules in your tailnet policy for this device and user.")
         case .deviceKeyCorrupt:
             TransportErrorPresentation(
                 summary: "The Device Key is corrupted",

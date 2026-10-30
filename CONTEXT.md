@@ -94,10 +94,6 @@ _Avoid_: local push, fake push
 A saved launch that types a shell command (by default its own name, e.g. the user's `cg` alias) into the interactive shell of a new pane, plus arguments, and environment variables set on that pane. herdr detects the Agent the command starts, and the launch names it. The profile also records which supported Agent kind the command starts, so only Hosts where that kind is installed offer it. Stored on the device.
 _Avoid_: alias, preset, agent template
 
-**Tailscale SSH Host**:
-A Host reached through tailscaled's SSH server instead of OpenSSH. The phone's tailnet identity and the tailnet policy authorize it, so it has no credential and no Enrollment; a `check` policy may hold a connection until the user approves a Tailscale login link. Its Pairing Code carries `auth: tailscale` and no Bootstrap Key.
-_Avoid_: tailnet key, Tailscale login (that is the browser check)
-
 **Enrollment**:
 The server-side step of Pairing: the forced command appends the Device Key's public key to authorized_keys. Distinct from Pairing as a whole — failure copy must say which step failed.
 _Avoid_: install key, authorization

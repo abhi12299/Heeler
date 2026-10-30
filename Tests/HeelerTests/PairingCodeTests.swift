@@ -95,8 +95,7 @@ struct PairingCodeTests {
         #expect(code.addresses == payload.addresses)
         #expect(code.port == payload.port)
         #expect(code.username == payload.username)
-        #expect(code.hostKeyFingerprint?.displayString == payload.hostKeyFingerprint)
-        #expect(code.authorization == (payload.auth == "tailscale" ? .tailscale : .openSSH))
+        #expect(code.hostKeyFingerprint.displayString == payload.hostKeyFingerprint)
 
         if let expectedSeed = payload.bootstrapSeed {
             let bootstrap = try #require(code.bootstrap)
