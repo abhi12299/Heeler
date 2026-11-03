@@ -125,6 +125,13 @@ _Avoid_: attach image, send image, upload image
 herdr's detected state of an Agent: Idle, Working, Blocked, Done, or Unknown. Blocked means the agent is waiting for human input and drives sort order and (later) notifications.
 _Avoid_: agent state, activity
 
+**Status Badge**:
+The Agent Status in its colored capsule, a field (`status_badge`) only a Row
+Slot's right side holds. The Status Ring already shows the status, so a row
+shows the capsule only where its layout adds it. The `status` field is the
+same status as plain text.
+_Avoid_: status chip, status pill
+
 **Pane**:
 herdr's unit of terminal real estate. A Pane hosts either an Agent or an
 ordinary shell — a workspace's root pane starts as a shell. Used as an address
@@ -161,7 +168,7 @@ Changes never modifies the Checkout.
 _Avoid_: diff, source control, Agent's changes, project changes
 
 **Console**:
-The native dashboard surface, split into Agents, Terminals, Hosts, and Settings tabs; the two lists share one Host filter, and each hides its own search field until pulled down. Agents lists Agents across Hosts as a flat list or collapsible sections By Host or By Workspace, opening Agent detail; its search also matches running Agents' transcripts. Workspace sections are scoped to their Host and ordered by their first Agent in the existing priority order; Agents keep their relative order within each section. A linked-worktree Workspace nests under the first main-checkout Workspace of the same repository on its Host (a collapsed parent counts its worktrees' Agents), and stays top-level when that Host has no such Workspace with Agents. By Workspace draws each top-level Workspace as a card: a repository's card titles its main checkout by the branch its Agents' Changes reads found and each worktree by its Workspace, and rows leave the Workspace, Host, and checkout directory to the card. An expanded card ends in New Agent for its Workspace. Presentation and collapse choices persist, and search opens matching sections without changing those choices. Terminals lists ordinary shell Panes as one card per Workspace, By Workspace or nested By Host, opening Shell Terminal. Hosts is Host management. The Console reopens the list tab it last showed. On an iPad beside its sidebar the tabs give way to the sidebar: a switch between the two lists at its top, Hosts and Settings as sheets from its foot, and each list's search behind a button there.
+The native dashboard surface, split into Agents, Terminals, Hosts, and Settings tabs; the two lists share one Host filter, and each hides its own search field until pulled down. Agents lists Agents across Hosts as a flat list or collapsible sections By Host or By Workspace, opening Agent detail; its search also matches running Agents' transcripts. Workspace sections are scoped to their Host and ordered by their first Agent in the existing priority order; Agents keep their relative order within each section. A linked-worktree Workspace nests under the first main-checkout Workspace of the same repository on its Host (a collapsed parent counts its worktrees' Agents), and stays top-level when that Host has no such Workspace with Agents. Until a snapshot proves a Host's Agents, its saved Chat entries are placed by the Workspace structure its last snapshot reported, so its cards keep the shape they had. By Workspace draws each top-level Workspace as a card: a repository's card titles its main checkout by the branch its Agents' Changes reads found (until a read of the launch lands, the branch the last one found, saved with the Workspace structure) and each worktree by its Workspace, and rows leave the Workspace, Host, and checkout directory to the card. An expanded card ends in New Agent for its Workspace. Presentation and collapse choices persist, and search opens matching sections without changing those choices. Terminals lists ordinary shell Panes as one card per Workspace, By Workspace or nested By Host, opening Shell Terminal. Hosts is Host management. The Console reopens the list tab it last showed. On an iPad beside its sidebar the tabs give way to the sidebar: a switch between the two lists at its top, Hosts and Settings as sheets from its foot, and each list's search behind a button there.
 _Avoid_: dashboard, home
 
 **Agent Search**:
@@ -178,23 +185,45 @@ _Avoid_: global search, history search, session search
 **Agent Row Layout**:
 The ordered rows of fields that identify an Agent in the Console and its
 switcher. Each Host follows its herdr plugin's fields until the user saves
-that Host's own layout, which may start from a Sync from plugin copy. There
+that Host's own layout, which may start from a Sync from plugin copy or
+from another Host's layout, applied to every Host from that Host's page. There
 is no user-facing default layout. The Console shows at most three rows, as
 three fixed Row Slots, and every Agent on a Host shares them: herdr's
 per-kind `rows_by_agent` overrides are decoded but never applied. herdr's
-`state_icon` never appears as a field; the status badge at the end of Row 1
-owns it. Agent Status and Heeler Pin remain independent chrome; choosing
-status as a field repeats it in the row.
+`state_icon` never appears as a field; the Status Badge field or the Status
+Ring shows the status. Heeler Pin remains independent chrome; choosing
+status as a field shows it as text in the row.
 _Avoid_: card template, sidebar format
+
+**Agent Mark**:
+The mark of the program an Agent runs (its kind), which leads the Agent's row
+in the Console: the program's own logo where Heeler ships one, else the first
+letter of its name. A logo names the program, so beside it an Agent field that
+only spells out the kind leaves a row with other fields, and rows sharing a
+title get no program name after it; an initial does neither. A renamed Agent
+keeps its name.
+_Avoid_: harness icon, avatar, logo
+
+**Status Ring**:
+The ring around every Agent Mark in the Console, which is the Agent Status:
+Working's open arc turns, Done and Blocked close it in their colors, and Idle
+keeps a hairline. The Status Badge and the `status` field add the status in
+words only where the Agent List Fields place them.
+_Avoid_: row style, status avatar
 
 **Row Slot**:
 One of the three fixed positions in an Agent Row Layout. Row 1 and Row 2 are
 herdr rows: they start from herdr's sidebar fields and are what Sync from
-plugin refills. Row 3 is Heeler's row, which Sync fills only when herdr
-defines a third row. Every slot accepts herdr fields and the Heeler-only
-fields herdr does not define (Host name, Agent Status as text, working
-directory). Slots are never added, moved, or deleted; an empty slot renders
-nothing.
+plugin refills. Row 3 is Heeler's row, which Sync keeps. Every slot accepts
+herdr fields and the Heeler-only fields herdr does not define (Host name,
+Agent Status as text, working directory). Each slot also has a right side
+that ends its line, Heeler's own, which Sync keeps and which alone can hold
+the Status Badge and the Checkout's Changes totals; a field sits on one side
+of a slot at most. Until a Host's layout chooses its right sides, the Console
+places them: the Host name ends the first line under the title, and the
+totals the last.
+Titles, the switcher, and Live Activities read only the left sides. Slots are
+never added, moved, or deleted; an empty slot renders nothing.
 _Avoid_: extra row, custom row
 
 **Pin**:
@@ -292,20 +321,33 @@ on-device cache; and the Heeler plugin on the Host itself, to total Claude Code
 and Codex Token Usage (ADR 0028).
 _Avoid_: log, history file, session file
 
+**Account**:
+One sign-in of Claude Code or Codex on a Host, identified by the config
+directory where that program keeps its sign-in and Transcripts. Each Host has
+one **Default Account** per program: the directory the program uses in herdr's
+own environment. For Claude Code the user may add more Accounts by choosing
+their directories; Heeler may suggest directories that look like one, but
+counts none until the user adds it. A Host's Accounts are shared by every
+device. Two directories signed in to the same login are still two Accounts,
+and switching logins inside one directory stays one Account (ADR 0030).
+_Avoid_: profile, login, user, config dir (the directory identifies an Account;
+it is not its name)
+
 **Usage Limits**:
-The windows a Claude Code or Codex account may use before the service slows
+The windows a Claude Code or Codex Account may use before the service slows
 or stops it, such as five hours or a week, each with the share used and when
-it resets, as the service reports them for the account signed in on a Host.
-They describe the account, not the Host or an Agent. Claude Code's are read
-only when the user turns them on for that Host (ADR 0028).
+it resets, as the service reports them for each Account on a Host. They
+describe the Account, not the Host or an Agent, and are never merged across
+Accounts. Claude Code's are read only when the user turns them on for that
+Host (ADR 0028).
 _Avoid_: quota, rate limit (in copy), plan usage, billing
 
 **Token Usage**:
 The tokens a Host's Claude Code and Codex Transcripts record over at most the
-last 30 days, by program, day, model and working directory, with the
-estimated cost of those tokens at API list prices. It counts only what this
-Host's Transcripts still hold, and is never the account's Usage Limits or a
-bill.
+last 30 days, by program, Account, day, model and working directory, with the
+estimated cost of those tokens at API list prices. It counts only what the
+Transcripts of the Host's Accounts still hold, and is never an Account's Usage
+Limits or a bill.
 _Avoid_: spend, cost (alone), usage (unqualified), credits
 
 **Blocked Card**:

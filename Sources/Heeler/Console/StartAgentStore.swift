@@ -160,7 +160,9 @@ final class StartAgentStore {
     /// `claude-2`, …), mirroring how the herdr TUI labels unnamed agents.
     var name: String = ""
     /// The canonical kind selected from the Host availability probe. With a
-    /// Custom Agent chosen, its base kind.
+    /// Custom Agent chosen, its base kind. Each probe reopens on this Host's
+    /// last launched choice, else the kind last started anywhere when this
+    /// Host has it, else the Host's first.
     var selectedAgentKind: SupportedAgentKind?
     /// The chosen Custom Agent, if the pick is one rather than a bare kind.
     private(set) var selectedCustomAgentID: CustomAgent.ID?
@@ -250,7 +252,7 @@ final class StartAgentStore {
     /// lands; waiting here keeps the opened detail from flashing its
     /// missing-Agent placeholder over a launch that just succeeded.
     private let awaitAgentVisible: (ConsoleAgent.ID) async -> Void
-    @ObservationIgnored private let recents: RecentWorkspaceStore
+    @ObservationIgnored private let recents: RecentLaunchStore
     /// In-flight guard flipped synchronously before the first await, so a
     /// double-tap cannot dispatch the same command twice through the window
     /// before `state == .starting` disables the button.
@@ -267,7 +269,7 @@ final class StartAgentStore {
         awaitAgentVisible: @escaping (ConsoleAgent.ID) async -> Void,
         origin: LaunchOrigin? = nil,
         preset: LaunchPreset? = nil,
-        recents: RecentWorkspaceStore = RecentWorkspaceStore()
+        recents: RecentLaunchStore = RecentLaunchStore()
     ) {
         self.hosts = hosts
         self.origin = origin
@@ -429,8 +431,13 @@ final class StartAgentStore {
             let kinds = try await discoverAgentKinds(hostID)
             guard selectedHostID == hostID else { return }
             availableAgentKinds = kinds
-            selectedAgentKind = kinds.first
-            // Reopen on the last launched choice when this Host still offers it.
+            if let remembered = recents.agentKind, kinds.contains(remembered) {
+                selectedAgentKind = remembered
+            } else {
+                selectedAgentKind = kinds.first
+            }
+            // This Host's last launched choice (which may be a Custom Agent)
+            // wins when the Host still offers it.
             if let remembered = recents.agentChoice(for: hostID) {
                 agentChoice = remembered
             }
@@ -552,10 +559,11 @@ final class StartAgentStore {
             recents.rememberAgentChoice(
                 customAgent.map { .custom($0.id) } ?? .builtIn(kind), for: hostID)
             if case .newWorkspace = destination {
-                recents.remember(agent.workspaceID, for: hostID)
+                recents.rememberWorkspace(agent.workspaceID, for: hostID)
             } else if let workspaceID {
-                recents.remember(workspaceID, for: hostID)
+                recents.rememberWorkspace(workspaceID, for: hostID)
             }
+            recents.rememberAgentKind(kind)
             let startedID = ConsoleAgent.ID(hostID: hostID, paneID: agent.paneID)
             // The wait is bounded; on timeout the owner still navigates and
             // the row catches up with the next resync.
@@ -815,6 +823,13 @@ final class StartAgentStore {
         default:
             "Starting the agent failed: \(error)"
         }
+    }
+}
+
+extension StartAgentStore.LaunchOrigin {
+    /// Beside `agent`: its Host, Workspace, and launch directory.
+    init(beside agent: ConsoleAgent) {
+        self.init(hostID: agent.hostID, workspaceID: agent.agent.workspaceID, cwd: agent.agent.cwd)
     }
 }
 

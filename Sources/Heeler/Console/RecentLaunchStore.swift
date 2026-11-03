@@ -1,13 +1,16 @@
 import Foundation
 
-/// The workspace the user last started an agent in, remembered per Host (#12).
+/// What the user last launched, so the new-agent sheet opens on it (#12,
+/// #601): launching several agents into the same project, with the same
+/// Agent, is the common case, and re-picking either every time is pure tax.
 ///
-/// The new-agent sheet pre-selects it: launching several agents into the same
-/// project is the common case, and re-picking the workspace every time is pure
-/// tax. Keyed by Host because a workspace ID only means something inside one
-/// herdr session.
-struct RecentWorkspaceStore {
-    private static let defaultsKey = "recent-workspace-by-host"
+/// The Workspace is remembered per Host because a workspace ID only means
+/// something inside one herdr session. The Agent kind is a single preference
+/// across Hosts: a Host that lacks it falls back to its own first kind.
+struct RecentLaunchStore {
+    private static let workspaceKey = "recent-workspace-by-host"
+    private static let agentKindKey = "recent-agent-kind"
+    private static let agentChoiceKey = "recent-agent-choice-by-host"
 
     private let defaults: UserDefaults
 
@@ -16,13 +19,23 @@ struct RecentWorkspaceStore {
     }
 
     func workspaceID(for hostID: Host.ID) -> String? {
-        byHost[hostID.uuidString]
+        workspacesByHost[hostID.uuidString]
     }
 
-    func remember(_ workspaceID: String, for hostID: Host.ID) {
-        var updated = byHost
+    func rememberWorkspace(_ workspaceID: String, for hostID: Host.ID) {
+        var updated = workspacesByHost
         updated[hostID.uuidString] = workspaceID
-        defaults.set(updated, forKey: Self.defaultsKey)
+        defaults.set(updated, forKey: Self.workspaceKey)
+    }
+
+    /// Nil until the first successful launch, or when a later version drops
+    /// the stored kind.
+    var agentKind: SupportedAgentKind? {
+        defaults.string(forKey: Self.agentKindKey).flatMap(SupportedAgentKind.init(rawValue:))
+    }
+
+    func rememberAgentKind(_ kind: SupportedAgentKind) {
+        defaults.set(kind.rawValue, forKey: Self.agentKindKey)
     }
 
     /// The Agent picker's last launched choice on a Host, stored as
@@ -52,11 +65,9 @@ struct RecentWorkspaceStore {
         defaults.set(updated, forKey: Self.agentChoiceKey)
     }
 
-    private static let agentChoiceKey = "recent-agent-choice-by-host"
-
     /// Entries for Hosts that no longer exist are harmless (a few bytes each,
     /// never read), so nothing prunes them.
-    private var byHost: [String: String] {
-        defaults.dictionary(forKey: Self.defaultsKey) as? [String: String] ?? [:]
+    private var workspacesByHost: [String: String] {
+        defaults.dictionary(forKey: Self.workspaceKey) as? [String: String] ?? [:]
     }
 }

@@ -164,6 +164,8 @@ final class AgentChatStore {
     }
 
     @ObservationIgnored private let source: AgentChatSource
+    /// The pictures image rows show, read over the same Host connection.
+    @ObservationIgnored let thumbnails: ChatImageThumbnails
     @ObservationIgnored private let timing: Timing
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private var agent: Agent
@@ -202,10 +204,17 @@ final class AgentChatStore {
     @ObservationIgnored private var lastAgentRefresh: Date?
     /// Agent queries and transcript reads recover independently.
     @ObservationIgnored private var agentRefreshFailure: TransportError?
+    /// One Agent query lost to the link can be a passing stall, which the
+    /// connection owner handles and shows by itself. A second in a row, in the
+    /// same stretch on screen, is news.
+    @ObservationIgnored private var consecutiveAgentRefreshLinkFailures = 0
     @ObservationIgnored private var transcriptReadFailure: TransportError?
     /// A page above the oldest message shown that waits for the loop, by
     /// who asked for it.
     @ObservationIgnored private var olderRequest: OlderRequest?
+    /// A long request for older history takes turns with looking for what
+    /// the Agent writes, so the newest rows never wait for the oldest.
+    @ObservationIgnored private var pollsBeforeNextOlderPage = false
     /// Look for the transcript's file again before the next read: Codex
     /// continues an undone thread in a new file and leaves the old one
     /// unchanged, so following it alone never shows the new turns.
@@ -342,6 +351,7 @@ final class AgentChatStore {
         self.agent = agent
         self.program = program
         self.source = source
+        thumbnails = ChatImageThumbnails(source: .init(files: source.files))
         self.timing = timing
         self.now = now
         let resolution = ConversationReference.resolve(agent.agentSession)
@@ -364,6 +374,7 @@ final class AgentChatStore {
     /// its own token, so one window leaving does not stop another's.
     func show(_ viewer: UUID = AgentChatStore.soleViewer) {
         if viewers.isEmpty {
+            consecutiveAgentRefreshLinkFailures = 0
             // Background prefetches back off looking for a missing
             // transcript; opening Chat looks at once and backs off afresh.
             switch conversation.phase {
@@ -401,6 +412,7 @@ final class AgentChatStore {
 
     func resume() {
         isSuspended = false
+        consecutiveAgentRefreshLinkFailures = 0
         needsAgentRefresh = true
         needsLaunchCheck = true
         startLoop()
@@ -435,6 +447,8 @@ final class AgentChatStore {
             await previous?.value
             guard let self else { return }
             if !Task.isCancelled {
+                // Warming is for the newest rows.
+                self.pollsBeforeNextOlderPage = true
                 await self.step()
                 await self.engine?.save(force: true)
             }
@@ -454,13 +468,26 @@ final class AgentChatStore {
 
     // MARK: Requests
 
-    /// Preview reads use the same Host connection as the transcript.
+    /// Preview reads use the same Host connection as the transcript;
+    /// thumbnails come from ``thumbnails``. A path a message names may be
+    /// relative to the Agent's directory or start at `~` (`ChatImageLink`).
     func readImage(at path: String) async throws -> Data {
-        try await ChatImagePreviewReader.read(path: path, files: source.files)
+        try await ChatImagePreviewReader.read(path: try await hostPath(ofImage: path), files: source.files)
     }
 
-    /// Reads one page above the oldest message shown, for the user or,
-    /// `automatic`, for a timeline whose rows do not fill the screen.
+    private func hostPath(ofImage path: String) async throws -> String {
+        if path.hasPrefix("/") { return path }
+        let home = path.hasPrefix("~/") ? try await source.files.home() : nil
+        let directory = agent.foregroundCwd.flatMap { $0.isEmpty ? nil : $0 } ?? agent.cwd
+        guard let resolved = ChatImagePath.resolve(path, cwd: directory, home: home) else {
+            throw ChatImagePreviewError.invalidPath
+        }
+        return resolved
+    }
+
+    /// Reads above the oldest message shown, a page per turn of the loop, for
+    /// the user or, `automatic`, for a timeline whose rows do not fill the
+    /// screen. Leaving Chat keeps the request; it goes on when Chat returns.
     func loadOlder(automatic: Bool = false) {
         // The timeline asks as the user does, unless the program bounds
         // what it loads by itself: then it never retries a failure, and
@@ -500,6 +527,7 @@ final class AgentChatStore {
     /// The Console's Host status changed. Rows expanded while it was not
     /// connected are read once it is.
     func hostConnectionChanged(_ isConnected: Bool) {
+        thumbnails.hostConnectionChanged(isConnected)
         guard isConnected != isHostConnected else { return }
         isHostConnected = isConnected
         guard isConnected else { return }
@@ -720,9 +748,13 @@ final class AgentChatStore {
         var polled = false
         var opened = false
         var didRead = true
-        if let request = olderRequest {
-            olderRequest = nil
+        var readOlder = false
+        let pollsFirst = pollsBeforeNextOlderPage
+        pollsBeforeNextOlderPage = false
+        if let request = olderRequest, !pollsFirst {
             snapshot = await engine.loadOlder(context: context, automatic: request == .automatic)
+            readOlder = true
+            pollsBeforeNextOlderPage = true
         } else if case .following = conversation.phase {
             if needsRelocate {
                 needsRelocate = false
@@ -743,6 +775,13 @@ final class AgentChatStore {
         }
         guard !Task.isCancelled, engine === self.engine, !isAwaitingSession else { return }
         if didRead { countTimeout(snapshot.readFailure) }
+        // The request is done, even with nothing new to read: the row shows
+        // what the engine says now rather than the request.
+        if readOlder, snapshot.older != .loading {
+            olderRequest = nil
+            pollsBeforeNextOlderPage = false
+            appliedRevision = nil
+        }
         apply(snapshot, from: engine)
         if polled || opened, case .following = snapshot.phase, snapshot.readFailure == nil {
             lastReadStartedAt = readStart
@@ -808,6 +847,8 @@ final class AgentChatStore {
                 guard let self else { return }
                 await self.step()
                 guard !Task.isCancelled else { return }
+                // The next page of a request doesn't wait for the pace.
+                if self.olderRequest != nil, self.engine != nil, !self.isAwaitingSession { continue }
                 await self.pause(self.interval)
             }
         }
@@ -891,7 +932,9 @@ final class AgentChatStore {
 
     private var sessionRecheckIsDue: Bool {
         let interval: TimeInterval
-        if engine == nil || isUnavailable || agentRefreshFailure != nil {
+        if engine == nil || isUnavailable || agentRefreshFailure != nil
+            || consecutiveAgentRefreshLinkFailures > 0
+        {
             interval = timing.sessionRecheck
         } else if isVisible, ChatAgentActivity(agent.status) == .idle {
             interval = timing.idleSessionRecheck
@@ -912,6 +955,7 @@ final class AgentChatStore {
         do {
             let fresh = try await source.agentInfo()
             guard !Task.isCancelled, recordRevision == sessionRecordRevision else { return nil }
+            consecutiveAgentRefreshLinkFailures = 0
             agentRefreshFailure = nil
             updateReadFailure()
             adoptRecord(fresh)
@@ -920,10 +964,24 @@ final class AgentChatStore {
             guard !Task.isCancelled, recordRevision == sessionRecordRevision,
                 !(error is CancellationError), error as? TransportError != .cancelled
             else { return nil }
-            agentRefreshFailure = error as? TransportError
+            let failure = error as? TransportError
                 ?? .channelFailed(detail: String(describing: type(of: error)))
+            consecutiveAgentRefreshLinkFailures =
+                Self.isLinkFailure(failure) ? consecutiveAgentRefreshLinkFailures + 1 : 0
+            guard consecutiveAgentRefreshLinkFailures != 1 else { return nil }
+            agentRefreshFailure = failure
             updateReadFailure()
             return nil
+        }
+    }
+
+    private static func isLinkFailure(_ failure: TransportError) -> Bool {
+        switch failure {
+        case .sshUnreachable, .timedOut, .channelFailed, .noRouteReached, .jumpHostFailed,
+            .overlayFailed:
+            true
+        default:
+            false
         }
     }
 
@@ -1079,6 +1137,7 @@ final class AgentChatStore {
         restored = false
         appliedRevision = nil
         olderRequest = nil
+        pollsBeforeNextOlderPage = false
         needsRelocate = false
         nextOpen = nil
         failedOpens = 0

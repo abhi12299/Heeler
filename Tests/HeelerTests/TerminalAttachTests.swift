@@ -779,6 +779,103 @@ struct TerminalAttachTests {
     }
 
     @MainActor
+    @Test func aFreshScrollCannotReviveExpiredMomentum() async throws {
+        let input = TerminalAttachInputQueue()
+        defer { input.finish() }
+        let terminal = TerminalScreenView.makeConfiguredTerminal(
+            onScroll: { input.scroll($0, rows: $1) })
+        terminal.receive(Data("\u{1B}[?1049h\u{1B}[?1000;1006h".utf8))
+        #expect(terminal.scrollTouch(translationY: 960) == 60)
+
+        // No writer can drain while the connection is stalled. A new gesture
+        // after recovery must not give these old rows a fresh lifetime.
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(terminal.scrollTouch(translationY: 32) == 2)
+        let wheel = Data("\u{1B}[<64;40;12M".utf8)
+        #expect(await input.next() == .scroll(wheel + wheel))
+    }
+
+    @Test func coalescedScrollKeepsItsOriginalExpiry() async {
+        let clock = Mutex(ContinuousClock.now)
+        let input = TerminalAttachInputQueue(now: { clock.withLock { $0 } })
+        defer { input.finish() }
+        let wheel = Data("wheel".utf8)
+        input.scroll(wheel, rows: 5)
+        clock.withLock { $0 += .milliseconds(199) }
+        input.scroll(wheel, rows: 2)
+        #expect(await input.next() == .scroll(wheel + wheel + wheel))
+
+        // Neither coalescing nor sending a batch may renew the remaining rows.
+        clock.withLock { $0 += .milliseconds(1) }
+        input.scroll(wheel, rows: 2)
+        #expect(await input.next() == .scroll(wheel + wheel))
+    }
+
+    @MainActor
+    @Test func stalledWriterDropsOldScrollButAcceptsFreshInput() async throws {
+        let input = TerminalAttachInputQueue()
+        let stalledWrite = ScriptedTransportCallGate()
+        let writes = Mutex<[Data]>([])
+        let terminal = TerminalScreenView.makeConfiguredTerminal(
+            onScroll: { input.scroll($0, rows: $1) })
+        terminal.receive(Data("\u{1B}[?1049h\u{1B}[?1000;1006h".utf8))
+        input.resize(cols: 80, rows: 24)
+        let writer = Task.detached {
+            try await input.pump(
+                write: { data in writes.withLock { $0.append(data) } },
+                resize: { _, _ in await stalledWrite.waitUntilOpen() })
+        }
+        await stalledWrite.waitForEntry()
+        #expect(terminal.scrollTouch(translationY: 960) == 60)
+        try await Task.sleep(for: .milliseconds(350))
+        await stalledWrite.open()
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(writes.withLock { $0.isEmpty }, "recovery must not replay old scroll rows")
+
+        let key = Data("new input".utf8)
+        let wheelDown = Data("\u{1B}[<65;40;12M".utf8)
+        input.send(key)
+        #expect(terminal.scrollTouch(translationY: -32) == -2)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while writes.withLock({ $0.count }) < 2, ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        input.finish()
+        try await writer.value
+        #expect(writes.withLock { $0 } == [key, wheelDown + wheelDown])
+    }
+
+    @MainActor
+    @Test func recoveryStopsRemoteMomentumButKeepsLocalScrollback() {
+        var remoteRows = 0
+        var localActions: [String] = []
+        let terminal = TerminalScreenView.makeConfiguredTerminal(
+            onScroll: { _, rows in remoteRows += rows })
+        terminal.didPerformBindingAction = { localActions.append($0) }
+        terminal.receive(Data("\u{1B}[?1049h\u{1B}[?1000;1006h".utf8))
+        terminal.startTouchScrollMomentum(velocityY: 2_000)
+        #expect(terminal.isTouchScrollMomentumRunning)
+        terminal.setRemoteScrollEnabled(false)
+        #expect(!terminal.isTouchScrollMomentumRunning)
+        #expect(terminal.scrollTouch(translationY: 960) == 0)
+        terminal.scrollRows(towardOlderContent: true, rows: 60)
+        terminal.startTouchScrollMomentum(velocityY: 2_000)
+        #expect(!terminal.isTouchScrollMomentumRunning)
+        #expect(remoteRows == 0)
+
+        terminal.setRemoteScrollEnabled(true)
+        #expect(!terminal.isTouchScrollMomentumRunning)
+        #expect(terminal.scrollTouch(translationY: -32) == -2)
+        #expect(remoteRows == 2)
+
+        terminal.receive(Data("\u{1B}[?1049l\u{1B}[?1000;1006l".utf8))
+        terminal.setRemoteScrollEnabled(false)
+        #expect(terminal.scrollTouch(translationY: 32) == 2)
+        #expect(localActions == ["scroll_page_lines:-2"])
+        #expect(remoteRows == 2)
+    }
+
+    @MainActor
     @Test func attachStartsWithTheIOSInputMethodAndKeyboardSwitcher() {
         let terminal = TerminalScreenView.makeConfiguredTerminal()
         #expect(terminal.keyboardMode == .text)
@@ -826,6 +923,40 @@ struct TerminalAttachTests {
         }
 
         #expect(pastes == ["provider paste"])
+    }
+
+    /// The input row's paste control takes its size from the frame SwiftUI
+    /// gives it, never from its own first measurement, which came back 0×0
+    /// and left an empty slot. A later frame resizes it too.
+    @MainActor
+    @Test func pinnedPasteControlFillsTheFrameItIsGiven() throws {
+        let view = PinnedPasteView(
+            backgroundColor: .secondarySystemBackground, cornerRadius: nil, paste: { _ in })
+        let control = try #require(view.subviews.compactMap { $0 as? UIPasteControl }.first)
+
+        view.frame = CGRect(x: 0, y: 0, width: 44, height: 44)
+        view.layoutIfNeeded()
+        #expect(control.frame == view.bounds)
+
+        view.frame = CGRect(x: 0, y: 0, width: 60, height: 34)
+        view.layoutIfNeeded()
+        #expect(control.frame == view.bounds)
+    }
+
+    @MainActor
+    @Test func pinnedPasteControlLoadsTextFromItsItemProvider() async throws {
+        var pastes: [String] = []
+        let view = PinnedPasteView(
+            backgroundColor: .secondarySystemBackground, cornerRadius: nil,
+            paste: { pastes.append($0) })
+
+        view.paste(itemProviders: [NSItemProvider(object: "pinned paste" as NSString)])
+        let deadline = ContinuousClock.now + .seconds(2)
+        while pastes.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(pastes == ["pinned paste"])
     }
 
     @MainActor
@@ -2935,6 +3066,28 @@ struct TerminalAttachTests {
         #expect(TerminalKeyboardInset.insetHeight(covered: 436, bottomSafeArea: 34) == 402)
         #expect(TerminalKeyboardInset.insetHeight(covered: 436, bottomSafeArea: 0) == 436)
         #expect(TerminalKeyboardInset.insetHeight(covered: 20, bottomSafeArea: 34) == 0)
+    }
+
+    /// A tab bar kept below a terminal (an unfolded iPhone's regular-width
+    /// Console) raises the terminal's bottom edge above the home indicator.
+    /// Measured from the window's safe area, the keyboard left a gap of the
+    /// difference above it.
+    @MainActor
+    @Test func theKeyboardInsetMeasuresFromTheTerminalsHostBottomEdge() async throws {
+        let controller = UIViewController()
+        controller.additionalSafeAreaInsets.bottom = 49
+        let anchor = UIView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        controller.view.addSubview(anchor)
+        let window = try await makeTestWindow(
+            frame: CGRect(x: 0, y: 0, width: 669, height: 951), rootViewController: controller)
+        defer { window.isHidden = true }
+        window.layoutIfNeeded()
+
+        let inset = try #require(
+            TerminalKeyboardInset.contentBottomInset(of: anchor, in: window))
+        #expect(abs(inset - (window.safeAreaInsets.bottom + 49)) <= 0.5)
+        #expect(TerminalKeyboardInset.contentBottomInset(of: nil, in: window) == nil)
+        #expect(TerminalKeyboardInset.contentBottomInset(of: UIView(), in: window) == nil)
     }
 
     @MainActor

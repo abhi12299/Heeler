@@ -262,6 +262,7 @@ struct AgentTerminalView: View {
     @State private var isSelectingPhoto = false
     @State private var isSelectingFile = false
     @State private var isConfirmingClose = false
+    @State private var closeRequest = AgentCloseRequest.closeAgent
     @State private var isStartingAgent = false
     @State private var isManagingSnippets = false
     @State private var isShowingSkillsPicker = false
@@ -286,6 +287,7 @@ struct AgentTerminalView: View {
     @Environment(\.detailCrossfade) private var detailCrossfade
     @Environment(\.revealDetailSidebar) private var revealDetailSidebar
     @Environment(\.showsDetailBackButton) private var showsBackButton
+    @Environment(\.usesVerticalToolbar) private var usesVerticalToolbar
     /// Whether the back header is out, or folded into its one button.
     /// Folded until the user shows it, so it covers no output by default,
     /// then remembered across Agents as a reading preference.
@@ -469,7 +471,10 @@ struct AgentTerminalView: View {
         // Keep the destination terminal enabled until Composer-to-Direct has
         // fully settled. The reverse handoff must disable this outgoing
         // terminal as soon as Composer accepts first responder.
+        // Recovery gates what reaches the Host in the input controller. It
+        // must not touch first responder: a slow reply cannot take the keyboard.
         screen.isLocalInputEnabled = isDirectInput || composerToDirectHandoffID != nil
+        screen.isRemoteScrollEnabled = attach.input.isEnabled && attach.terminalStatus == .live
         screen.claimsKeyboard = {
             [
                 keyboardHandoff,
@@ -587,10 +592,7 @@ struct AgentTerminalView: View {
             StartAgentView(
                 hosts: hosts,
                 console: console,
-                origin: StartAgentStore.LaunchOrigin(
-                    hostID: agent.hostID,
-                    workspaceID: agent.agent.workspaceID,
-                    cwd: agent.agent.cwd),
+                origin: StartAgentStore.LaunchOrigin(beside: agent),
                 onStarted: { switchToAgent($0) })
             .modifier(ConsoleSheetPresentationModifier(
                 presentation: ConsoleSheetPresentation(
@@ -962,7 +964,10 @@ struct AgentTerminalView: View {
                 } : nil,
             renameAgent: { isRenamingAgent = true },
             renameWorkspace: { isRenamingWorkspace = true },
-            closeAgent: { isConfirmingClose = true },
+            closeAgent: {
+                closeRequest = console.closeRequest(for: agent.id)
+                isConfirmingClose = true
+            },
             backToConsole: { backToConsole() },
             showChat: showChat.map { showChat in
                 {
@@ -976,11 +981,15 @@ struct AgentTerminalView: View {
                 ? AgentCloseConfirmation(
                     title: title,
                     isPresented: $isConfirmingClose,
-                    close: { Task { await performClose() } })
-                : nil)
+                    request: closeRequest,
+                    removeSavedChat: { if console.removeSavedChat(agent) { onClosed() } },
+                    closeAgent: { Task { await performClose() } })
+                : nil,
+            removesSavedChat: console.isSavedChat(agent.id))
     }
 
-    /// The edge swipe's destination, shared with the More menu's entry.
+    /// The More menu's Back to Console: the sidebar beside a detail that
+    /// stands next to its list, the list otherwise.
     private func backToConsole() {
         if let revealDetailSidebar { revealDetailSidebar() } else { dismiss() }
     }
@@ -1048,17 +1057,8 @@ struct AgentTerminalView: View {
             }
         }
         .overlay { statusOverlay }
-        // Keep the edge gesture below the input chrome and tools dock so
-        // its transparent hit region cannot intercept their leading keys.
-        // A detail pushed over the list has the back header and the
-        // system's own swipe instead, which follows the finger.
-        .overlay(alignment: .leading) {
-            if !showsBackButton {
-                AgentEdgeBackGesture { backToConsole() }
-            }
-        }
-        // Above the edge gesture, which would otherwise take the tab's taps;
-        // the tab hands a horizontal drag back to it.
+        // Agent Search's tab; it hands a horizontal drag back to the
+        // Console where no system back swipe covers this edge.
         .overlay {
             if var agentSearchDrawer {
                 let _ = agentSearchDrawer.onBackSwipe = showsBackButton ? nil : { backToConsole() }
@@ -1067,6 +1067,9 @@ struct AgentTerminalView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             ComposerStagingStatusBar(staging: session.staging)
+                .ridesKeyboard(
+                    keyboardInset, layoutInset: composerKeyboardLayout.contentInset,
+                    isEnabled: composerRidesKeyboard)
         }
         // Below the keyboard's own inset, so the strip rides above the
         // keyboard while it is up and rests on the screen's edge once it is
@@ -1074,6 +1077,9 @@ struct AgentTerminalView: View {
         // switching to whether or not the user is typing.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             inputChrome
+                .ridesKeyboard(
+                    keyboardInset, layoutInset: composerKeyboardLayout.contentInset,
+                    isEnabled: composerRidesKeyboard)
         }
         // Not SwiftUI's keyboard avoidance: it retracts in two stages and the
         // terminal would resize twice per dismissal. See TerminalKeyboardInset.
@@ -1117,11 +1123,12 @@ struct AgentTerminalView: View {
             AgentDetailHeader(
                 palette: themePalette,
                 isExpanded: $isBackHeaderExpanded,
-                onBack: showsBackButton ? { dismiss() } : nil,
+                onBack: showsBackButton && !usesVerticalToolbar ? { dismiss() } : nil,
                 actions: backHeaderActions,
                 surfaceSwitch: chatSurfaceSwitch,
                 title: AgentDetailHeaderTitle(agent),
-                trailingInBar: headerSharesBar)
+                statusTitle: connectionRecoveryTitle,
+                controlPlacement: headerControlPlacement)
             .environment(
                 \.colorScheme,
                 terminal.themes.selection(for: colorScheme).chromeColorScheme(for: colorScheme))
@@ -1134,11 +1141,18 @@ struct AgentTerminalView: View {
         .onWindowControlsHeightChange { windowControlsHeight = $0 }
         .background {
             // Keyboard geometry and the status bar inset follow this view's
-            // own window, not whichever window of the app is key.
-            WindowReader { window in
-                keyboardInset.attach(to: window)
-                mountedWindow.attach(window)
-            }
+            // own window, not whichever window of the app is key. The reader
+            // also anchors the keyboard measurement to this screen's own
+            // bottom edge, which a tab bar can hold above the window's (see
+            // `TerminalKeyboardInset.contentBottomInset`).
+            WindowReader(
+                onWindow: { window in
+                    keyboardInset.attach(to: window)
+                    mountedWindow.attach(window)
+                },
+                onView: { window, view in
+                    keyboardInset.attach(to: window, contentAnchor: view)
+                })
             .allowsHitTesting(false)
             .accessibilityHidden(true)
         }
@@ -1166,14 +1180,21 @@ struct AgentTerminalView: View {
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar(.visible, for: .navigationBar)
         .detailHeaderBarControls(
-            headerSharesBar,
+            headerControlPlacement,
             palette: themePalette,
             isExpanded: $isBackHeaderExpanded,
             actions: backHeaderActions,
-            surfaceSwitch: chatSurfaceSwitch)
+            surfaceSwitch: chatSurfaceSwitch,
+            onBack: showsBackButton && usesVerticalToolbar ? { dismiss() } : nil)
+        .prioritizesVerticalDetailToolbar()
     }
 
     private var headerSharesBar: Bool { AgentDetailHeader.levelsWithBar(barRow) }
+
+    private var headerControlPlacement: AgentDetailHeaderControlPlacement {
+        AgentDetailHeaderControlPlacement(
+            headerSharesBar: headerSharesBar, usesVerticalToolbar: usesVerticalToolbar)
+    }
 
     private var terminalTopInset: CGFloat {
         max(statusBarInset, topChromeInset, windowControlsHeight)
@@ -1205,6 +1226,12 @@ struct AgentTerminalView: View {
         return actions
     }
 
+    /// Direct Input keeps its own keyboard handling, and the tools dock is
+    /// not a keyboard that moves.
+    private var composerRidesKeyboard: Bool {
+        !isDirectInput && directToComposerHandoffID == nil && composerKeyboardPresentation != .tools
+    }
+
     private func prepareComposerKeyboardPresentation(
         _ presentation: AgentComposerKeyboardPresentation
     ) {
@@ -1216,6 +1243,9 @@ struct AgentTerminalView: View {
         case .system:
             keyboardInset.resumeHeightCapture()
             keyboardInset.expectSoftwareKeyboard()
+        }
+        if composerKeyboardPresentation == .tools, presentation != .tools {
+            keyboardInset.skipKeyboardRideLeavingToolsDock()
         }
     }
 
@@ -1527,7 +1557,7 @@ struct AgentTerminalView: View {
 
     private func currentWindowKeyboardHeight() -> CGFloat? {
         guard let window = keyboardControl.terminal?.window else { return nil }
-        return TerminalKeyboardInset.layoutGuideHeight(in: window)
+        return keyboardInset.keyboardHeight(in: window)
     }
 
     private func cancelKeyboardHandoffs() {
@@ -1841,6 +1871,11 @@ struct AgentTerminalView: View {
         }
     }
 
+    private var connectionRecoveryTitle: String? {
+        if attach.terminalStatus == .reconnecting { return "Reconnecting…" }
+        return console.connectionRecoveryTitle(for: agent.hostID)
+    }
+
     @ViewBuilder
     private var statusOverlay: some View {
         if let away = LiveInAnotherWindowPresentation(
@@ -1861,7 +1896,9 @@ struct AgentTerminalView: View {
                     .buttonStyle(.terminalStatusPrimary)
                 }
             }
-        } else if let presentation = TerminalStatusPresentation(status: attach.terminalStatus) {
+        } else if connectionRecoveryTitle == nil,
+            let presentation = TerminalStatusPresentation(status: attach.terminalStatus)
+        {
             switch presentation.kind {
             case .connecting:
                 // No dim: a reattach would otherwise flash the whole screen dark.
@@ -1931,30 +1968,6 @@ struct AgentTerminalView: View {
 
     static func displayTitle(for agent: ConsoleAgent) -> String {
         agent.agent.title.isEmpty ? agent.agent.displayName : agent.agent.title
-    }
-}
-
-/// Preserve edge-swipe navigation after the title bar is removed. Beside
-/// an iPad's sidebar the swipe brings the sidebar out instead of going back.
-struct AgentEdgeBackGesture: View {
-    let dismiss: @MainActor () -> Void
-
-    var body: some View {
-        Color.clear
-            .frame(width: 24)
-            .frame(maxHeight: .infinity)
-            .contentShape(.rect)
-            .gesture(
-                DragGesture(minimumDistance: 12, coordinateSpace: .global)
-                    .onEnded { value in
-                        let horizontal = value.translation.width
-                        guard value.startLocation.x <= 24,
-                              horizontal >= 72,
-                              abs(value.translation.height) <= horizontal * 0.75
-                        else { return }
-                        dismiss()
-                    })
-            .accessibilityHidden(true)
     }
 }
 

@@ -1,7 +1,7 @@
-<!-- Translated from docs/guides/chat.md at c9c8167e -->
+<!-- Translated from docs/guides/chat.md at 371b84c8 -->
 # 在 Chat 中使用 Agent
 
-Chat 把 Agent 的对话显示成消息，而不是终端画面。你可以查看 Agent 做了什么、回复它，并用按钮回答它的提问。
+在 iPhone 或 iPad 上通过 Heeler 的原生 Chat 使用 Claude Code 和 Codex。你可以阅读对话并通过 SSH 回复，Agent 继续在 Host 上运行。
 
 你需要一台运行 herdr 的 macOS 或 Linux Host，并在上面运行 Claude Code、Codex、Pi、Oh My Pi、Grok Build 或 OpenCode 的 Agent。
 
@@ -53,6 +53,7 @@ Heeler 会记住你的选择，之后打开的 Agent 都会先显示 Chat，直�
 - 你的消息在右侧，Agent 的回答、推理和工具步骤在左侧。
 - 一轮对话结束后，其中的步骤会折叠到一行 **Worked for …** 后面。轻点这一行可以展开，轻点工具卡片可以查看输出或文件改动。
 - 按住一条消息即可复制。
+- 轻点工具步骤下的图片，或消息里的图片路径（前面带照片图标），可以打开并缩放查看。
 - 向上滚动后，轻点右下角带向下 V 形箭头的圆形按钮，可回到最新消息。
 - 在顶部继续下拉可加载更早的消息。
 

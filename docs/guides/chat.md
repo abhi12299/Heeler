@@ -1,6 +1,6 @@
 # Chat with an Agent
 
-Chat shows an Agent's conversation as messages instead of a terminal screen. Read what the Agent did, reply, and answer its questions with buttons.
+Use Claude Code and Codex in Heeler's native Chat on iPhone or iPad. Read conversations and reply over SSH while your Agents keep running on the Host.
 
 You need a macOS or Linux Host running herdr, and an Agent there running Claude Code, Codex, Pi, Oh My Pi, Grok Build, or OpenCode.
 
@@ -52,6 +52,7 @@ If there is no **Show Chat**, or Chat shows **Waiting for Conversation**, see [C
 - Your messages are on the right. The Agent's answers, reasoning, and tool steps are on the left.
 - When a turn finishes, its steps fold behind a **Worked for …** line. Tap it to see them, and tap a tool card to see its output or file changes.
 - Touch and hold a message to copy it.
+- Tap an image under a tool step, or a path to an image in a message (shown after a photo symbol), to open it with zoom.
 - After scrolling up, tap the round button with a down chevron at the bottom right to jump back to the newest message.
 - Pull down past the top to load earlier messages.
 

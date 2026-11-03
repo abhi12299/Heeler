@@ -50,7 +50,10 @@ extension TerminalAgentSwitcherItem {
         var counts: [[String]: Int] = [:]
         for item in items { counts[shown(item), default: 0] += 1 }
         return zip(agents, items).map { agent, item in
-            guard counts[shown(item), default: 0] > 1 else { return item }
+            // A chip already titled by the Agent's own name keeps it: the
+            // place after it would not tell the Agents apart either.
+            guard counts[shown(item), default: 0] > 1, item.title != agent.agent.displayName
+            else { return item }
             return TerminalAgentSwitcherItem(
                 id: item.id, title: sharedPlaceTitle(for: agent, place: item.title),
                 status: item.status, isPinned: item.isPinned)

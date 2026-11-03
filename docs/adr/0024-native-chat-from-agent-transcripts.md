@@ -229,8 +229,14 @@ needs anchoring in the same main-thread turn.
 Earlier history loads by itself as the reader nears the top of the list. Each
 request reads pages until it brings the start of a turn not shown before,
 since a page that ends inside a turn adds only steps its fold hides, or until
-it reaches the start of the file or has read 32 MiB. A request the list makes
-by itself reads as one from Load Earlier Messages does, except in Grok Build,
+it reaches the start of the file or has read 32 MiB. Each page shows as it
+comes, and Chat looks for what the Agent wrote between pages, because a search
+that long over a phone's connection otherwise leaves the list short and stale
+until it ends. Leaving Chat keeps the request, which goes on when Chat returns.
+Reopened, the live window starts at the tail below rows the cache shows, and
+the reducer needs those records to walk further up, so a request reads them
+again. They spend none of its 32 MiB: it would otherwise end with nothing new.
+A request the list makes by itself reads as one from Load Earlier Messages does, except in Grok Build,
 where it reads at most 4 MiB. Grok Build records each `read_file` result in
 full, so one turn can fill tens of MB: a turn that read 21 files of 99,000
 bytes and compacted automatically three times wrote result lines of about
@@ -282,8 +288,10 @@ once, stays readable offline, and survives the remote file's removal.
 
 Each Host also keeps its Chat entry points: the Agents last seen and the
 conversation each was bound to, so an offline Console still lists them and a
-live Agent that has not reported its session reopens the right one. Those
-bindings belong to one machine and herdr session. The machine is the host
+live Agent that has not reported its session reopens the right one. An entry
+listed while its Host is unproven is removed on the device, with its cached
+conversation and pin, never through a close request; a later snapshot lists
+the Agent again if it still runs. Those bindings belong to one machine and herdr session. The machine is the host
 key the device trusts for the Host (ADR 0022), not a route: routes may be
 added, reordered, or edited freely, but a replaced key, a changed account, or
 another herdr session drops them. So does another Herdr Endpoint socket,
@@ -293,7 +301,36 @@ connection re-proves the saved bindings before live Agents can use them. A
 Host the device holds no key for yet, and directories saved before the Host
 had one, compare the primary route instead.
 
-Image tool rows with a recorded Host file path offer a native long-press preview. Tapping the preview opens a zoomable sheet. Paths come from transcript metadata, resolving relative paths only against the recorded working directory; display titles are never treated as paths. Reads use the existing read-only SFTP connection on demand, stop at 20 MiB, and decode off the main actor to at most 4,096 pixels on the long edge. Image bytes are not cached with transcripts. Missing, changed, unsupported or disconnected files show a retryable explanation.
+Image tool rows with a recorded Host file path show the image as a thumbnail
+under their title, and a tap on it opens a zoomable sheet; a long press
+previews the sheet. Every program records the path: a Claude Code Read whose
+result is an image, Codex's image views and generated images, a Grok Build
+`read_file` whose result holds an image, a Pi or Oh My Pi `read` whose result
+says it read an image file (Oh My Pi names the resolved file in
+`details.mediaPath`), an OpenCode 2 read whose result returns an image (named
+as the path it read), and an OpenCode 1.x read of a file with an image
+extension. Paths come from transcript metadata, resolving relative paths only
+against the recorded working directory; display titles are never treated as
+paths. An OpenCode session records only the folder it is in now, so a read
+before a move resolves against the folder that move left, and against none
+when the move does not name it. A row
+whose image shows is never folded into a tool group, so the image stays in
+view while its turn is open.
+
+Reads use the existing read-only SFTP connection on demand and stop at
+20 MiB. A thumbnail is read only while its row is on screen, one file at a
+time per Agent, and a row that leaves the screen cancels its read; files over
+8 MiB wait for a tap. It decodes off the main actor to at most 1,024 pixels on
+the long edge, the sheet to 4,096. Its height is fixed and only its width
+follows the image, so an image arriving never changes a row's measured height.
+Decoded thumbnails stay in memory only, in one cache bounded by pixel memory,
+keyed by the file's size and modification time: a file written again at the
+same path, as Agents do with screenshots, reads again. Every row naming that
+path then shows its current file, not the one the Agent saw at the time.
+Offline, a copy kept from this run still shows. Image bytes are not cached
+with transcripts. Missing, changed, unsupported or disconnected files show a
+short, retryable explanation in the thumbnail's place, and a thumbnail waiting
+for the Host loads once it connects.
 
 ## Sending
 
@@ -637,8 +674,9 @@ once per path, a write over an existing file as an edit, a write that records
 no diff as written, a path changed more than once under its first change while
 reads count apart), their lines changed, and a spinner or a count of failures.
 Reasoning between calls joins the group; reasoning with no text shows
-nowhere. Subagent launches, questions, calls waiting on the user and Codex's
-user shell commands are never grouped. While a turn runs, its last group
+nowhere. Subagent launches, questions, calls waiting on the user, Codex's
+user shell commands and calls whose image the row shows are never grouped.
+While a turn runs, its last group
 keeps its newest call as its own row below the group, so its status and
 output stay in reach, and settles into one row, under a new identity and
 closed, once anything else follows. A call waiting on the user after the

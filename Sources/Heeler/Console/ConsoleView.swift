@@ -100,10 +100,11 @@ struct ConsoleView: View {
     /// presented when a deep link carries the window off to an Agent.
     @State private var hostsTabGeneration = 0
     @State private var settingsTabGeneration = 0
-    @State private var isStartingAgent = false
-    /// The Host and Workspace a By Workspace New Agent row prefills; nil
-    /// for every other way into the sheet.
-    @State private var newAgentPreset: StartAgentStore.LaunchPreset?
+    /// The New Agent sheet while it is up. An item rather than a flag, so
+    /// the sheet reads the origin it was opened with.
+    @State private var startAgentRequest: StartAgentRequest?
+    /// A By Workspace card's icon column, which a transcript snippet clears.
+    private var cardColumn = CardIconWidth()
     @State private var connectionDetailRequest: ConnectionDetailRequest?
     /// The flat lists' summary opened: every Host problem in one sheet.
     @State private var isShowingHostIssues = false
@@ -130,6 +131,9 @@ struct ConsoleView: View {
     /// The Agent whose tab the swipe action would close; non-nil shows the
     /// close confirmation.
     @State private var pendingTabClose: ConsoleAgent?
+    /// The saved Chat entry the swipe action would remove from this device;
+    /// separate from a close, which asks the Host and says so.
+    @State private var pendingSavedChatRemoval: ConsoleAgent?
     /// Owns presentation mode and Host/Workspace collapse state.
     @State private var listPresentation = ConsoleListPresentationStore()
     /// Outlives the detail column's rebuilds, which is the whole point: it
@@ -180,8 +184,10 @@ struct ConsoleView: View {
                 Label(ConsoleTab.terminals.title, systemImage: "terminal")
                     .environment(\.symbolVariants, .none)
             }
-            Tab(ConsoleTab.usage.title, systemImage: "chart.bar.xaxis", value: ConsoleTab.usage) {
-                usageTab()
+            if console.isUsageEnabled {
+                Tab(ConsoleTab.usage.title, systemImage: "chart.bar.xaxis", value: ConsoleTab.usage) {
+                    usageTab()
+                }
             }
             Tab(ConsoleTab.hosts.title, systemImage: "server.rack", value: ConsoleTab.hosts) {
                 hostList(
@@ -206,10 +212,10 @@ struct ConsoleView: View {
             if listTab == nil { listTab = shownListTab }
         }
         // The detail's actions can present these even while the sidebar is hidden.
-        .sheet(isPresented: $isStartingAgent, onDismiss: { newAgentPreset = nil }) {
+        .sheet(item: $startAgentRequest) { request in
             ConsoleSheetContent(sheetPresentation) { presentation in
                 // StartAgentView brings its own NavigationStack.
-                StartAgentView(hosts: hosts.hosts, console: console, preset: newAgentPreset) { id in
+                StartAgentView(hosts: hosts.hosts, console: console, origin: request.origin, preset: request.preset) { id in
                     // A fresh launch lands in its own terminal, exactly
                     // as tapping the new row would, on the list that has it.
                     if currentTab != .agents { selectedTab.wrappedValue = .agents }
@@ -232,6 +238,10 @@ struct ConsoleView: View {
         } message: {
             Text(tabCloseError ?? "")
         }
+        .modifier(SavedChatRemovalAlert(
+            pending: $pendingSavedChatRemoval,
+            message: savedChatRemovalMessage(for:),
+            remove: removeSavedChat))
         .sheet(isPresented: $isStartingTerminal) {
             ConsoleSheetContent(sheetPresentation) { presentation in
                 // NewTerminalView brings its own NavigationStack.
@@ -292,6 +302,7 @@ struct ConsoleView: View {
             guard let link = UsageWidgetLink.target(from: url) else { return }
             openUsage(link)
         }
+        .modifier(UsageTurnedOffReset(isEnabled: console.isUsageEnabled, reset: leaveUsage))
         // Retries answered, the Host no longer failing, drop what they saw.
         .onChange(of: hostIssuesSheetExplained) { _, explained in
             hostIssuesLastFailures = hostIssuesLastFailures.filter { explained.contains($0.key) }
@@ -374,7 +385,9 @@ struct ConsoleView: View {
                 if isUsageTabSelected { return .usage }
                 return shownListTab
             },
-            set: { tab in
+            set: { requested in
+                // Usage turned off behind a screen that opened from it.
+                let tab = requested == .usage && !console.isUsageEnabled ? shownListTab : requested
                 let leavingList = shownListTab
                 // A search field keeping first responder through the switch
                 // can leave the arriving tab blank; its query stays.
@@ -422,7 +435,7 @@ struct ConsoleView: View {
         HostListView(
             store: hosts,
             initialHostID: hostsTabRequest?.hostID,
-            usageStore: { console.agentUsageStore(for: $0) },
+            usageStore: console.isUsageEnabled ? { console.agentUsageStore(for: $0) } : nil,
             openUsage: { openUsage(for: $0) },
             showsSetupGuide: hostsTabRequest?.showsSetupGuide ?? false,
             connectionStatuses: console.hostStatuses,
@@ -462,7 +475,9 @@ struct ConsoleView: View {
     }
 
     /// The lists an iPad sidebar's title menu switches between.
-    private static let sidebarLists: [ConsoleTab] = [.agents, .terminals, .usage]
+    private var shownSidebarLists: [ConsoleTab] {
+        console.isUsageEnabled ? [.agents, .terminals, .usage] : [.agents, .terminals]
+    }
 
     /// Every Host the Usage tab can read, in catalog order.
     private var usageEntries: [AgentUsageHostEntry] {
@@ -485,7 +500,7 @@ struct ConsoleView: View {
                     .toolbar {
                         ToolbarItem(placement: .topBarLeading) {
                             SidebarListMenu(
-                                shown: .usage, lists: Self.sidebarLists,
+                                shown: .usage, lists: shownSidebarLists,
                                 isPresented: $isShowingUsageListMenu, frame: $usageListMenuTitleFrame)
                         }
                         .toolbarItemBackground(.hidden)
@@ -501,7 +516,7 @@ struct ConsoleView: View {
                                 .frame(width: 1, height: 1)
                                 .popover(isPresented: $isShowingUsageListMenu, arrowEdge: .top) {
                                     SidebarListChoices(
-                                        shown: .usage, lists: Self.sidebarLists,
+                                        shown: .usage, lists: shownSidebarLists,
                                         isPresented: $isShowingUsageListMenu,
                                         select: { selectedTab.wrappedValue = $0 })
                                 }
@@ -556,12 +571,23 @@ struct ConsoleView: View {
     /// A Usage widget's tap: the tab on the widget's scope, and for Usage
     /// Limits, that Host's limits. A Host since removed opens All Hosts.
     private func openUsage(_ link: UsageWidgetLink.Target) {
+        guard console.isUsageEnabled else { return }
         let hostID = link.hostID.flatMap { id in hosts.hosts.contains { $0.id == id } ? id : nil }
         usageScopeHostID = hostID
         isShowingHostsSheet = false
         isShowingSettingsSheet = false
         selectedTab.wrappedValue = .usage
         usageLimitsRequested = link.showsLimits && hostID != nil
+    }
+
+    /// Usage turned off, from this window or another: nothing of it stays
+    /// selected or asked for, so turning it back on opens where it first did.
+    private func leaveUsage() {
+        if isUsageTabSelected { selectedTab.wrappedValue = shownListTab }
+        usageScopeHostID = nil
+        usageShowsLimits = false
+        usageLimitsRequested = false
+        isShowingUsageListMenu = false
     }
 
     private func switchList(to tab: ConsoleTab) {
@@ -617,7 +643,7 @@ struct ConsoleView: View {
         // Hosts and Settings tabs present their own sheets, which cover the
         // tab bar: one up now is theirs. Rebuilding the tab takes it down,
         // as closing them does where they are sheets.
-        let ownsPresentation = isStartingAgent || isStartingTerminal
+        let ownsPresentation = startAgentRequest != nil || isStartingTerminal
             || connectionDetailRequest != nil || isShowingHostIssues
             || isShowingHostsSheet || isShowingSettingsSheet
         if isPresentingOverConsole, !ownsPresentation {
@@ -631,7 +657,7 @@ struct ConsoleView: View {
         isHostsTabSelected = false
         isSettingsTabSelected = false
         isUsageTabSelected = false
-        isStartingAgent = false
+        startAgentRequest = nil
         isStartingTerminal = false
         connectionDetailRequest = nil
         isShowingHostIssues = false
@@ -783,6 +809,7 @@ struct ConsoleView: View {
                     // (Changes over an Agent) with the system's Back and swipe.
                     NavigationStack {
                         detail(in: tab)
+                            .readsVerticalToolbar()
                             .environment(
                                 \.detailTopChromeInset,
                                 horizontalSizeClass == .regular ? detailTopInset(for: tab) : 0)
@@ -889,7 +916,7 @@ struct ConsoleView: View {
                         .frame(width: 1, height: 1)
                         .popover(isPresented: $isShowingListMenu, arrowEdge: .top) {
                             SidebarListChoices(
-                                shown: tab, lists: Self.sidebarLists,
+                                shown: tab, lists: shownSidebarLists,
                                 isPresented: $isShowingListMenu, select: switchList(to:))
                         }
                         .position(anchor)
@@ -1020,7 +1047,7 @@ struct ConsoleView: View {
         if usesSidebarNavigation {
             ToolbarItem(placement: .topBarLeading) {
                 SidebarListMenu(
-                    shown: tab, lists: Self.sidebarLists,
+                    shown: tab, lists: shownSidebarLists,
                     isPresented: $isShowingListMenu, frame: $listMenuTitleFrame)
             }
             .toolbarItemBackground(.hidden)
@@ -1088,7 +1115,11 @@ struct ConsoleView: View {
     /// bar as it is.
     private func newItemButton(for tab: ConsoleTab) -> some View {
         Button(tab == .terminals ? "New Terminal" : "New Agent", systemImage: "plus") {
-            if tab == .terminals { isStartingTerminal = true } else { isStartingAgent = true }
+            if tab == .terminals {
+                isStartingTerminal = true
+            } else {
+                startAgentRequest = StartAgentRequest()
+            }
         }
     }
 
@@ -1139,7 +1170,7 @@ struct ConsoleView: View {
                     // Tabs are navigation, not cover: only sheets and alerts
                     // are, including the ones Hosts, Settings and the
                     // Terminals list present, which register nowhere.
-                    isCovered: isStartingAgent || isStartingTerminal
+                    isCovered: startAgentRequest != nil || isStartingTerminal
                         || connectionDetailRequest != nil || isShowingHostIssues
                         || isShowingHostsSheet || isShowingSettingsSheet
                         || isPresentingOverConsole,
@@ -1181,7 +1212,7 @@ struct ConsoleView: View {
                 if currentTab == .terminals {
                     isStartingTerminal = true
                 } else {
-                    isStartingAgent = true
+                    startAgentRequest = StartAgentRequest()
                 }
             },
             settings: { showSettings() },
@@ -1328,13 +1359,12 @@ struct ConsoleView: View {
             || stagedTerminalChromeScheme.map { $0 == colorScheme } ?? true
     }
 
-    /// What an edge swipe on an iPad's detail does instead of going back:
-    /// the detail stands beside its list there, so the swipe brings the
-    /// sidebar out rather than leaving the screen. Nil on an iPhone and in
-    /// a compact window, where the detail is pushed and the swipe goes back.
+    /// What going back from a regular-width detail does instead: the detail
+    /// stands beside its list there, on an iPad or a wide iPhone alike, so
+    /// the sidebar comes out rather than the detail leaving the screen. Nil
+    /// in compact width, where the detail is pushed and goes back.
     private func sidebarReveal(for tab: ConsoleTab) -> (@MainActor @Sendable () -> Void)? {
-        guard horizontalSizeClass == .regular, UIDevice.current.userInterfaceIdiom == .pad
-        else { return nil }
+        guard horizontalSizeClass == .regular else { return nil }
         return { [splitVisibilities = $splitVisibilities, reduceMotion] in
             withAnimation(reduceMotion ? nil : .snappy) {
                 splitVisibilities.wrappedValue[tab, default: ConsoleSplitVisibilityState()]
@@ -1364,15 +1394,14 @@ struct ConsoleView: View {
     }
 
     /// The detail column. Not keyed off the live Agent list alone: the
-    /// selection must survive the list emptying while an Agent is shown
-    /// (a reconnect empties it briefly), so a vanished Agent shows a
-    /// placeholder instead of clearing the selection.
+    /// selection and terminal remain mounted while recovery temporarily empties
+    /// the inventory. A fresh snapshot still decides whether the Agent exists.
     @ViewBuilder
     private func detail(in tab: ConsoleTab) -> some View {
         if let id = notificationRouter.path.last {
             if let receipt = matchingRemovedWorktreeReceipt(for: id) {
                 removedWorktreeSurface(receipt)
-            } else if let agent = console.chatDisplayAgents.first(where: { $0.id == id }) {
+            } else if let agent = console.agentForDetail(id) {
                 AgentDetailView(
                     agent: agent,
                     console: console,
@@ -1389,7 +1418,7 @@ struct ConsoleView: View {
                         // terminal on a spurious reappearance.
                         isVisible: { [notificationRouter] in
                             notificationRouter.path.last == id
-                                && console.chatDisplayAgents.contains(where: { $0.id == id })
+                                && console.agentForDetail(id) != nil
                                 && currentTab == tab
                         },
                         terminalAccess: { [sceneRouting] in
@@ -1464,7 +1493,11 @@ struct ConsoleView: View {
                             .showSidebar()
                     }
                 case .newAgent:
-                    if tab == .terminals { isStartingTerminal = true } else { isStartingAgent = true }
+                    if tab == .terminals {
+                        isStartingTerminal = true
+                    } else {
+                        startAgentRequest = StartAgentRequest()
+                    }
                 case .hosts: presentHosts()
                 }
             }
@@ -1594,17 +1627,13 @@ struct ConsoleView: View {
     @ViewBuilder
     private var agentHostIssueRows: some View {
         if !visibleHostIssues.isEmpty {
-            // On the Agent rows' edges; the list's own separator sets it
-            // apart from the first Agent.
+            // On the Agent rows' edges and, as they are, without rules.
             ConsoleHostIssueList(
                 issues: visibleHostIssues, onOpenHost: { openHostIssue($0) },
                 onShowAll: { isShowingHostIssues = true })
-                .modifier(ListRowVerticalInsetsRemoved())
+                .modifier(ListRowVerticalInsets(0))
                 .listRowBackground(Color.clear)
-                // Under the title nothing needs a rule; below, it runs from
-                // the edge the Agent rows' rules do.
-                .listRowSeparator(.hidden, edges: .top)
-                .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
+                .listRowSeparator(.hidden)
         }
     }
 
@@ -1614,15 +1643,7 @@ struct ConsoleView: View {
         let qualifiers = agentTitleQualifiers
         let saved = console.savedChatEntries
         ForEach(filteredAgents) { @Sendable agent in
-            MainActorContent {
-                agentRow(agent, qualifier: qualifiers[agent.id], saved: saved[agent.id])
-                    // Right under an iPad sidebar's bar, a rule over the
-                    // first row would crowd it.
-                    .listRowSeparator(
-                        usesSidebarNavigation && visibleHostIssues.isEmpty
-                            && agent.id == filteredAgents.first?.id ? .hidden : .automatic,
-                        edges: .top)
-            }
+            MainActorContent { agentRow(agent, qualifier: qualifiers[agent.id], saved: saved[agent.id]) }
         }
     }
 
@@ -1659,8 +1680,8 @@ struct ConsoleView: View {
     /// Opens New Agent with this Workspace's Host and Workspace filled in.
     private func newAgentRow(in section: ConsoleWorkspaceSection) -> some View {
         Button {
-            newAgentPreset = .init(hostID: section.id.hostID, workspaceID: section.id.workspaceID)
-            isStartingAgent = true
+            startAgentRequest = StartAgentRequest(
+                preset: .init(hostID: section.id.hostID, workspaceID: section.id.workspaceID))
         } label: {
             // A quiet secondary action: the card's Agents stay the focus.
             HStack(spacing: ConsoleWorkspaceCardMetrics.iconSpacing) {
@@ -1683,12 +1704,14 @@ struct ConsoleView: View {
     /// Where the Agents list's search found this Agent's transcript, as the
     /// Agent search drawer shows it.
     @ViewBuilder
-    private func transcriptSnippet(for agent: ConsoleAgent) -> some View {
+    /// `indent` lines the snippet up with the row's text, past its mark.
+    private func transcriptSnippet(for agent: ConsoleAgent, indent: CGFloat) -> some View {
         if let hit = console.agentListSearch.transcriptHits[agent.id] {
             Text(hit.snippet)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+                .padding(.leading, indent)
                 .accessibilityLabel("Transcript: \(hit.snippet)")
         }
     }
@@ -1732,8 +1755,11 @@ struct ConsoleView: View {
         case .agent(let agent, let section, let standsAlone):
             agentLink(
                 agent,
+                isSaved: saved[agent.id] != nil,
+                // A saved Agent's Workspace may be gone with its Host session.
+                newAgentOrigin: saved[agent.id] == nil ? StartAgentStore.LaunchOrigin(beside: agent) : nil,
                 background: ConsoleWorkspaceCardRow(
-                    placed: placed, indent: standsAlone ? .icon : .text,
+                    placed: placed, indent: .icon,
                     top: standsAlone ? (placed.followsHeader ? 0 : 6) : 2, bottom: standsAlone ? 6 : 4,
                     isSelected: notificationRouter.path.last == agent.id)
             ) {
@@ -1753,9 +1779,9 @@ struct ConsoleView: View {
         }
     }
 
-    /// An Agent as its card shows it: an Agent that is its checkout's or
-    /// Workspace's only one takes that title and icon; a row leaves to the
-    /// card what the card already says.
+    /// An Agent as its card shows it, its mark in the card's icon column:
+    /// an Agent that is its checkout's or Workspace's only one takes that
+    /// title and icon; a row leaves to the card what the card already says.
     private func cardAgentLabel(
         _ agent: ConsoleAgent, of section: ConsoleWorkspaceSection, standsAlone: Bool,
         in card: ConsoleWorkspaceCard, qualifier: String?, saved: HostReadiness?, readsChanges: Bool
@@ -1764,40 +1790,41 @@ struct ConsoleView: View {
         let heading = standsAlone
             ? AgentCardHeading(
                 title: card.isRepository ? checkoutTitle(section) : ConsoleCheckoutTitle(title: section.title),
-                isProminent: !card.isRepository)
+                isProminent: !card.isRepository,
+                systemImage: ConsoleWorkspaceCardIcon.systemName(for: section.checkout))
             : nil
-        return HStack(alignment: .firstTextBaseline, spacing: ConsoleWorkspaceCardMetrics.iconSpacing) {
-            if standsAlone {
-                ConsoleWorkspaceCardIcon(checkout: section.checkout)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                AgentCardView(
-                    agent: agent,
-                    layout: console.rowLayout(for: agent.hostID),
-                    isPinned: console.pins.isPinned(
-                        hostID: agent.hostID, paneID: agent.agent.paneID),
-                    changes: readsChanges ? console.rowChanges.store(for: agent) : nil,
-                    qualifier: standsAlone ? nil : qualifier,
-                    saved: saved,
-                    hiddenTokens: ConsoleWorkspaceCard.hiddenTokens(for: agent, showsHost: showsHost),
-                    heading: heading,
-                    showsHost: showsHost)
-                transcriptSnippet(for: agent)
-            }
+        return VStack(alignment: .leading, spacing: 4) {
+            AgentCardView(
+                agent: agent,
+                layout: console.rowLayout(for: agent.hostID),
+                isPinned: console.pins.isPinned(
+                    hostID: agent.hostID, paneID: agent.agent.paneID),
+                changes: readsChanges ? console.rowChanges.store(for: agent) : nil,
+                qualifier: standsAlone ? nil : qualifier,
+                saved: saved,
+                hiddenTokens: ConsoleWorkspaceCard.hiddenTokens(
+                    for: agent, checkoutPath: section.checkout?.checkoutPath, showsHost: showsHost),
+                heading: heading,
+                showsHost: showsHost,
+                lead: .card)
+            transcriptSnippet(for: agent, indent: cardColumn.value + cardColumn.spacing)
         }
     }
 
     /// A repository's checkout, titled by the branch its Agents' latest
-    /// Changes reads found.
+    /// Changes reads found, or before any did, the branch saved from the
+    /// last read.
     private func checkoutTitle(_ section: ConsoleWorkspaceSection) -> ConsoleCheckoutTitle {
         let reads = section.agents.compactMap { agent -> CheckoutChanges? in
             guard case .loaded(let changes) = console.rowChanges.store(for: agent)?.phase else { return nil }
             return changes
         }
+        let path = section.checkout?.checkoutPath
         return ConsoleCheckoutTitle(
             label: section.title,
             isMainCheckout: section.checkout?.isLinkedWorktree != true,
-            branch: ConsoleCheckoutTitle.branch(at: section.checkout?.checkoutPath, in: reads))
+            branch: ConsoleCheckoutTitle.branch(at: path, in: reads)
+                ?? console.savedBranch(on: section.id.hostID, atCheckoutPath: path))
     }
 
     private func checkoutSummaries(_ card: ConsoleWorkspaceCard) -> [ConsoleCheckoutSummary] {
@@ -1889,6 +1916,7 @@ struct ConsoleView: View {
                         // condition says what it is before any Agents it lists.
                         if let issue = section.statusPresentation {
                             ConsoleHostIssueRow(issue: issue) { openHostIssue($0) }
+                                .listRowSeparator(.hidden)
                         }
                         ForEach(section.agents) { @Sendable agent in
                             MainActorContent { agentRow(agent, qualifier: qualifiers[agent.id], saved: saved[agent.id]) }
@@ -1911,9 +1939,12 @@ struct ConsoleView: View {
         }
     }
 
+    /// An Agent's row in the plain lists: no rules between rows, and closer
+    /// together than the list would set them, as their marks set them apart.
     private func agentRow(_ agent: ConsoleAgent, qualifier: String?, saved: HostReadiness?) -> some View {
         agentLink(
             agent,
+            isSaved: saved != nil,
             background: ConsoleRowSelectionBackground(
                 isSelected: notificationRouter.path.last == agent.id)
         ) {
@@ -1926,7 +1957,8 @@ struct ConsoleView: View {
                     changes: console.rowChanges.store(for: agent),
                     qualifier: qualifier,
                     saved: saved)
-                transcriptSnippet(for: agent)
+                transcriptSnippet(
+                    for: agent, indent: AgentCardView.rowAvatarDiameter + AgentCardView.rowLeadSpacing)
             }
         } preview: {
             AgentCardView(
@@ -1937,13 +1969,17 @@ struct ConsoleView: View {
                 qualifier: qualifier,
                 saved: saved)
         }
+        .listRowSeparator(.hidden)
+        .modifier(ListRowVerticalInsets(4))
     }
 
     /// An Agent's row: `label` opens its detail, with the row's pin, close,
-    /// and window actions. `background` draws the row's place in the list;
-    /// `preview` is what a lifted card shows (see `ConsoleRowContextMenu`).
+    /// and window actions, and New Agent beside it when `newAgentOrigin` is
+    /// set. `background` draws the row's place in the list; `preview` is
+    /// what a lifted card shows (see `ConsoleRowContextMenu`).
     private func agentLink<RowContent: View, Background: ViewModifier, Preview: View>(
-        _ agent: ConsoleAgent, background: Background,
+        _ agent: ConsoleAgent, isSaved: Bool, newAgentOrigin: StartAgentStore.LaunchOrigin? = nil,
+        background: Background,
         @ViewBuilder label: () -> RowContent, @ViewBuilder preview: () -> Preview
     ) -> some View {
         NavigationLink(value: ConsoleSelection.agent(agent.id)) {
@@ -1976,14 +2012,27 @@ struct ConsoleView: View {
                         openInNewWindow(agent)
                     }
                 }
+                // In the Agent's Workspace and directory, as its detail's
+                // New Agent starts one.
+                if let newAgentOrigin {
+                    Button("New Agent", systemImage: "plus") {
+                        startAgentRequest = StartAgentRequest(origin: newAgentOrigin)
+                    }
+                }
                 // Asks first, like the swipe. A menu item can be destructive:
                 // the row stays put until the close succeeds.
                 Divider()
-                Button(
-                    "Close \(closeScope(for: agent))", systemImage: "trash",
-                    role: .destructive
-                ) {
-                    pendingTabClose = agent
+                if isSaved {
+                    Button(SavedChatRemovalCopy.action, systemImage: "trash", role: .destructive) {
+                        pendingSavedChatRemoval = agent
+                    }
+                } else {
+                    Button(
+                        "Close \(closeScope(for: agent))", systemImage: "trash",
+                        role: .destructive
+                    ) {
+                        pendingTabClose = agent
+                    }
                 }
             } preview: {
                 preview()
@@ -2010,9 +2059,13 @@ struct ConsoleView: View {
         // while the confirmation is still up, even if the user cancels.
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button {
-                pendingTabClose = agent
+                if isSaved {
+                    pendingSavedChatRemoval = agent
+                } else {
+                    pendingTabClose = agent
+                }
             } label: {
-                Label("Close", systemImage: "trash")
+                Label(isSaved ? SavedChatRemovalCopy.confirm : "Close", systemImage: "trash")
             }
             .tint(.red)
         }
@@ -2060,6 +2113,19 @@ struct ConsoleView: View {
         guard let agent = pendingTabClose else { return }
         pendingTabClose = nil
         closeTabNow(agent)
+    }
+
+    private func savedChatRemovalMessage(for agent: ConsoleAgent) -> String {
+        SavedChatRemovalCopy.message(
+            naming: AgentCardPresentation(
+                agent: agent, layout: console.rowLayout(for: agent.hostID)
+            ).switcherTitle)
+    }
+
+    /// An open detail goes with its entry, which it can no longer show.
+    private func removeSavedChat(_ agent: ConsoleAgent) {
+        let isSelected = notificationRouter.path.last == agent.id
+        if console.removeSavedChat(agent), isSelected { clearSelection() }
     }
 
     /// What closing this Agent takes down, widest first.
@@ -2195,12 +2261,17 @@ struct ConsoleView: View {
     private var agentTitleQualifiers: [ConsoleAgent.ID: String] {
         // By Workspace rows leave fields to their card's titles.
         let isByWorkspace = listPresentation.mode == .byWorkspace
+        let savedStructures = isByWorkspace ? console.savedWorkspaceStructures : [:]
         return AgentTitleQualifier.qualifiers(for: hostFilteredAgents) { agent in
+            let checkoutPath = agent.checkoutPath
+                ?? savedStructures[agent.hostID]?.first { $0.id == agent.agent.workspaceID }?.checkout.checkoutPath
             let card = AgentCardPresentation(
                 agent: agent, layout: console.rowLayout(for: agent.hostID),
                 hiding: isByWorkspace
-                    ? ConsoleWorkspaceCard.hiddenTokens(for: agent, showsHost: false) : [])
-            return .init(title: card.headline, namesAgent: card.namesAgent(inFirst: card.rows.count))
+                    ? ConsoleWorkspaceCard.hiddenTokens(for: agent, checkoutPath: checkoutPath, showsHost: false)
+                    : [],
+                leadsWithMark: true)
+            return .init(title: card.headline, namesAgent: card.cardNamesAgent)
         }
     }
 
@@ -2567,15 +2638,21 @@ extension View {
     }
 }
 
-/// Drops a row's vertical insets and keeps the list's own side margins, so
-/// the row's edges and chevron meet the Agent rows' at every width: the
+/// Sets a row's vertical insets and keeps the list's own side margins, so
+/// the row's edges and chevron meet the other rows' at every width: the
 /// margins are 20 points on the widest iPhones, not 16.
-private struct ListRowVerticalInsetsRemoved: ViewModifier {
+private struct ListRowVerticalInsets: ViewModifier {
+    let length: CGFloat
+
+    init(_ length: CGFloat) {
+        self.length = length
+    }
+
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            content.listRowInsets(.vertical, 0)
+            content.listRowInsets(.vertical, length)
         } else {
-            content.listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+            content.listRowInsets(EdgeInsets(top: length, leading: 16, bottom: length, trailing: 16))
         }
     }
 }
@@ -2757,6 +2834,41 @@ struct MissingAgentPresentation: Equatable {
     }
 }
 
+/// A saved Chat row's swipe or context menu asks here before removing it.
+private struct UsageTurnedOffReset: ViewModifier {
+    let isEnabled: Bool
+    let reset: () -> Void
+
+    func body(content: Content) -> some View {
+        content.onChange(of: isEnabled) { _, enabled in
+            if !enabled { reset() }
+        }
+    }
+}
+
+private struct SavedChatRemovalAlert: ViewModifier {
+    @Binding var pending: ConsoleAgent?
+    let message: (ConsoleAgent) -> String
+    let remove: (ConsoleAgent) -> Void
+
+    func body(content: Content) -> some View {
+        content.alert(
+            SavedChatRemovalCopy.question,
+            isPresented: Binding(
+                get: { pending != nil },
+                set: { if !$0 { pending = nil } })
+        ) {
+            Button(SavedChatRemovalCopy.confirm, role: .destructive) {
+                if let pending { remove(pending) }
+                pending = nil
+            }
+            Button("Cancel", role: .cancel) { pending = nil }
+        } message: {
+            Text(pending.map(message) ?? "")
+        }
+    }
+}
+
 /// Collapsible Host-section header for the grouped Console list (#245).
 private struct ConsoleHostSectionHeaderView: View {
     let presentation: ConsoleHostSectionHeaderPresentation
@@ -2888,6 +3000,15 @@ enum ConsoleSelection: Hashable {
     case terminal(ConsoleTerminal.ID)
 }
 
+/// One presentation of the New Agent sheet: beside `origin`'s Agent when a
+/// card row's menu opened it, else on a Host the form asks for.
+private struct StartAgentRequest: Identifiable {
+    let id = UUID()
+    var origin: StartAgentStore.LaunchOrigin?
+    /// The Host and Workspace a By Workspace New Agent row prefills.
+    var preset: StartAgentStore.LaunchPreset?
+}
+
 /// What a list tab showed when the other list took the stage.
 private enum ParkedSelection {
     case agent(ConsoleAgent.ID)
@@ -2914,9 +3035,10 @@ extension EnvironmentValues {
     /// sidebar's glass, and keeps its search field in view, or on an iPad
     /// searches from the sidebar's foot.
     @Entry var isSidebarColumn = false
-    /// Brings out the sidebar beside an iPad's detail column. A detail's
-    /// edge swipe calls it in place of going back; nil where the detail has
-    /// no sidebar to show.
+    /// Brings out the sidebar beside a regular-width detail column. Back to
+    /// Console calls it in place of going back, and a detail drops its own
+    /// edge swipe for the split view's; nil where the detail has no sidebar
+    /// to show.
     @Entry var revealDetailSidebar: (@MainActor @Sendable () -> Void)? = nil
     /// The detail is pushed over the list, on an iPhone or in a compact iPad
     /// window, so its floating header carries a Back button. A window's

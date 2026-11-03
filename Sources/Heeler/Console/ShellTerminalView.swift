@@ -55,6 +55,7 @@ struct ShellTerminalView: View {
     @Environment(\.detailSurfaceEdges) private var surfaceEdges
     @Environment(\.revealDetailSidebar) private var revealDetailSidebar
     @Environment(\.showsDetailBackButton) private var showsBackButton
+    @Environment(\.usesVerticalToolbar) private var usesVerticalToolbar
     /// Shared with Agent detail's header: folding it is one reading
     /// preference across both kinds of terminal.
     @AppStorage("agent.back-header-expanded") private var isBackHeaderExpanded = false
@@ -86,6 +87,7 @@ struct ShellTerminalView: View {
         }
         screen.keyboardControl = keyboardControl
         screen.isLocalInputEnabled = true
+        screen.isRemoteScrollEnabled = store.input.isEnabled && store.terminalStatus == .live
         // The first surface of this screen takes the keyboard only if the
         // screen it came from left it up. A later surface on the same screen
         // (a recovered pipeline) is a replacement, not an arrival: it keeps
@@ -207,11 +209,11 @@ struct ShellTerminalView: View {
             .overlay { statusOverlay }
             // The input row and controls dock must stay above the edge
             // gesture's hit region, including their leftmost buttons.
+            // Beside a sidebar the split view's own swipe brings it out,
+            // following the finger; a strip here would take the touch first.
             .overlay(alignment: .leading) {
-                if !usesSystemBackSwipe {
-                    ShellTerminalEdgeBackGesture(isEnabled: !isReturning) {
-                        if let revealDetailSidebar { revealDetailSidebar() } else { await goBack() }
-                    }
+                if !usesSystemBackSwipe, revealDetailSidebar == nil {
+                    ShellTerminalEdgeBackGesture(isEnabled: !isReturning) { await goBack() }
                 }
             }
             // Always present, keyboard up or down: with no title bar, its
@@ -260,13 +262,13 @@ struct ShellTerminalView: View {
                 AgentDetailHeader(
                     palette: themePalette,
                     isExpanded: $isBackHeaderExpanded,
-                    onBack: showsBackButton
+                    onBack: showsBackButton && !usesVerticalToolbar
                         ? {
                             guard !isReturning else { return }
                             Task { await goBack() }
                         } : nil,
                     actions: backHeaderActions,
-                    trailingInBar: headerSharesBar)
+                    controlPlacement: headerControlPlacement)
                 .environment(
                     \.colorScheme,
                     terminal.themes.selection(for: colorScheme)
@@ -281,10 +283,17 @@ struct ShellTerminalView: View {
             .background {
                 // Keyboard geometry and the status bar inset follow this
                 // view's own window, not whichever window of the app is key.
-                WindowReader { window in
-                    keyboardInset.attach(to: window)
-                    mountedWindow.attach(window)
-                }
+                // The reader also anchors the keyboard measurement to this
+                // screen's own bottom edge, which a tab bar can hold above
+                // the window's (see `TerminalKeyboardInset.contentBottomInset`).
+                WindowReader(
+                    onWindow: { window in
+                        keyboardInset.attach(to: window)
+                        mountedWindow.attach(window)
+                    },
+                    onView: { window, view in
+                        keyboardInset.attach(to: window, contentAnchor: view)
+                    })
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             }
@@ -311,8 +320,15 @@ struct ShellTerminalView: View {
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar(.visible, for: .navigationBar)
             .detailHeaderBarControls(
-                headerSharesBar, palette: themePalette, isExpanded: $isBackHeaderExpanded,
-                actions: backHeaderActions)
+                headerControlPlacement, palette: themePalette,
+                isExpanded: $isBackHeaderExpanded,
+                actions: backHeaderActions,
+                onBack: showsBackButton && usesVerticalToolbar
+                    ? {
+                        guard !isReturning else { return }
+                        Task { await goBack() }
+                    } : nil)
+            .prioritizesVerticalDetailToolbar()
             .sheet(
                 isPresented: Binding(
                     get: { store.pendingPaste != nil },
@@ -384,10 +400,16 @@ struct ShellTerminalView: View {
 
     private var headerSharesBar: Bool { AgentDetailHeader.levelsWithBar(barRow) }
 
+    private var headerControlPlacement: AgentDetailHeaderControlPlacement {
+        AgentDetailHeaderControlPlacement(
+            headerSharesBar: headerSharesBar, usesVerticalToolbar: usesVerticalToolbar)
+    }
+
     /// A terminal pushed over the Console list goes back the system's way,
     /// following the finger. One opened from an Agent stands in for that
     /// Agent on the same screen, so a system swipe there would leave the
-    /// Agent too; it keeps the edge gesture that returns to it.
+    /// Agent too; it keeps the edge gesture that returns to it. Beside a
+    /// sidebar neither applies: the split view's swipe brings the list out.
     private var usesSystemBackSwipe: Bool {
         showsBackButton && !backReturnsToAgent
     }
@@ -652,6 +674,7 @@ struct ShellTerminalInputRow: View {
     static let glyphPointSize: CGFloat = 12
     @Environment(\.displayScale) private var displayScale
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.colorScheme) private var colorScheme
 
     private var sizeClass: InputShortcutStripPresentation.SizeClass {
         horizontalSizeClass == .regular ? .regular : .compact
@@ -663,20 +686,15 @@ struct ShellTerminalInputRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            PasteButton(payloadType: String.self) { strings in
-                guard let text = strings.first else { return }
-                paste(text)
-            }
-            .labelStyle(.iconOnly)
-            .buttonBorderShape(.capsule)
-            // The system default is an accent-tinted tile, which shouts next
-            // to the mode control. Painting the fill with the row's own
-            // background leaves the glyph reading as a bare icon.
-            .tint(Color(uiColor: .secondarySystemBackground))
-            .frame(
-                width: InputChromeLayout.shellAccessoryButtonWidth,
-                height: InputChromeLayout.shortcutRowHeight)
-            .frame(width: Self.sideWidth, alignment: .leading)
+            // Painting the fill with the row's own background leaves the
+            // glyph reading as a bare icon, like the row's other buttons.
+            PinnedPasteControl(backgroundColor: .secondarySystemBackground, paste: paste)
+                .id(colorScheme)
+                .accessibilityHint("Pastes the clipboard into the terminal")
+                .frame(
+                    width: InputChromeLayout.shellAccessoryButtonWidth,
+                    height: InputChromeLayout.shortcutRowHeight)
+                .frame(width: Self.sideWidth, alignment: .leading)
 
             Spacer(minLength: 4)
 
@@ -784,8 +802,7 @@ struct ShellTerminalKeysDock: View {
     }
 }
 
-/// Goes back on an edge swipe, or beside an iPad's sidebar brings the
-/// sidebar out instead.
+/// Goes back on an edge swipe.
 private struct ShellTerminalEdgeBackGesture: View {
     let isEnabled: Bool
     let onBack: @MainActor () async -> Void

@@ -5,6 +5,8 @@ import Foundation
 /// reading, keeping a Host's last report while it cannot read a newer one.
 struct UsageWidgetSnapshot: Codable, Equatable, Sendable {
     static let currentVersion = 1
+    /// What a Host's widget says while Usage is off in the app.
+    static let usageOffReason = "Usage is off in Settings."
 
     var version = Self.currentVersion
     /// In catalog order.
@@ -86,6 +88,15 @@ struct UsageWidgetSnapshot: Codable, Equatable, Sendable {
 
         let program: String
         let name: String
+        /// The Claude Code Account these limits are for, while the Host has
+        /// several: each Account is an entry of its own, in the app's order.
+        /// nil for a program's own, and in snapshots from before Accounts.
+        let account: String?
+        /// That Account's id in the Host's report, which stays unique when
+        /// names do not (the plugin accepts an added Account named
+        /// "Default" while the Default Account has no name of its own). nil
+        /// with `account`, and in snapshots from before it was kept.
+        let accountID: String?
         /// Why there are no windows to show; nil when the program reported them.
         let message: String?
         /// The program would not answer again yet: these are its last windows.
@@ -94,7 +105,15 @@ struct UsageWidgetSnapshot: Codable, Equatable, Sendable {
         let observedAt: Date?
         let windows: [Window]
 
-        var id: String { program }
+        /// The program, or with an Account its report id; an older
+        /// snapshot's Account by its name.
+        var id: String {
+            guard let key = accountID ?? account else { return program }
+            return "\(program).\(key)"
+        }
+
+        /// "Claude Code · claude-2", or the program alone.
+        var title: String { account.map { "\(name) · \($0)" } ?? name }
     }
 
     struct Window: Codable, Equatable, Sendable, Identifiable {

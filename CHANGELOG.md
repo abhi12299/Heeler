@@ -44,6 +44,29 @@ Entries reference the pull request that made the change.
   New Agent also reopens on the Agent you last started on that Host.
 - `make free-install` builds and installs Heeler with a free Apple ID, without
   push notifications or Live Activities.
+- Paths to images in Chat messages open the image. A path to a picture on the
+  Host, written as code, as a link or in the text of your messages or the
+  Agent's, shows in the tint color after a photo symbol; tap it, or choose
+  Preview Image from the message's menu, to open it with zoom. Paths relative
+  to the Agent's folder and paths starting at `~` open too. (#618)
+- Touch and hold an Agent on a By Workspace card and tap New Agent to start
+  one in its Workspace and directory, as the Agent's own New Agent does.
+  (#616)
+- Browse Directories hides folders whose names start with a dot. Tap the eye
+  button beside Select to list them again; Heeler remembers the choice.
+  (#609)
+- New Agent opens on the Agent you started last, when the Host has it
+  installed. (#608)
+- Chat shows the images Agents read or make as thumbnails under their rows;
+  tap one to open it with zoom. Claude Code, Codex, Grok Build, Pi, Oh My Pi
+  and OpenCode are covered, and image rows no longer fold into tool groups.
+  Images over 8 MB load on a tap, and a deleted image or an offline Host says
+  so in the thumbnail's place. (#600)
+- Turn Usage off in Settings to hide its tab and each Host's Usage section and
+  stop reading usage from your Hosts. Usage widgets clear their figures and say
+  so until you turn it back on. (#597)
+- Pull the grabber on the Composer's top edge down to hide the keyboard.
+  (#594)
 - Pair a herdr that runs with its own config home, such as a per-project
   instance or a profile started by a wrapper script. Its pairing popup now
   shows a Pairing Code v2 that names its socket and a launcher the plugin
@@ -53,9 +76,40 @@ Entries reference the pull request that made the change.
   on the Host. (#521)
 - Check a changed host key before trusting it: the Host's page shows the new
   key and a command to copy that prints it on the Host or Jump Host. (#531)
+- Choose what ends each Agent row on the right in Agent List Fields: any
+  field, the Host name, the status capsule (`status_badge`), or the
+  Checkout's Changes totals, per Host. Sync from plugin keeps them. (#591)
+- Give every Host the same Agent row fields: Apply to All Hosts on a Host's
+  page in Agent List Fields copies its rows, right sides included, to the
+  other Hosts. (#591)
+- Count several Claude Code sign-ins on one Host. Usage shows each Claude
+  Code Account, one config directory each, with its own Usage Limits and
+  its share of Token Usage, in the app and in the Usage Limits widgets.
+  Heeler suggests directories that running Agents or your home folder use,
+  and you can choose another; a Host has up to four Accounts. When herdr's
+  environment sets `CLAUDE_CONFIG_DIR`, `~/.claude` no longer counts toward
+  it until you add it as an Account. Update the Heeler plugin to 0.8.0 on
+  the Host. (#529; PR #533)
+- Open the documentation from About in Settings. (#594)
 
 ### Changed
 
+- Give an Agent's title on a By Workspace card one size and color, whether
+  the Agent shares its checkout or stands alone under the checkout's title,
+  and set a repository's checkout titles apart from it in a quieter color.
+  (#598)
+- Raise and lower the Composer with the keyboard, in step with it, and move
+  Chat's conversation and fold along instead of jumping ahead of it. (#594)
+- Run animation at up to 120Hz on iPhones with ProMotion. (#594)
+- Lead each Agents list row with its program's mark, such as Claude Code's
+  or Codex's, inside a ring that shows its status, the Working ring turning,
+  in place of the status capsule; add `status_badge` to a row's right side
+  in Agent List Fields to bring the capsule back. A row no longer repeats
+  the program's name beside other fields, or after a title it shares with
+  another Agent's; programs without a mark show their initial and keep
+  their name. (#591)
+- Set the Agents list's rows closer together, without rules between them;
+  By Workspace cards keep only the rules between checkouts. (#591)
 - Show the Agents list By Workspace as cards, with Workspaces on a linked
   git worktree in their repository's card: the main checkout under its
   current branch, each worktree beneath it, and a collapsed card still
@@ -69,6 +123,71 @@ Entries reference the pull request that made the change.
 - Agents of one kind that share a Tab no longer look alike: each chip in
   the Agent switcher above the keyboard leads with the Agent's own name, and
   an Agents list card says which kind a named Agent is beside its Host.
+- By Workspace keeps each repository's card while Heeler connects: saved
+  Chats from a main checkout and its worktrees open under the same card the
+  running Agents had, instead of as separate cards that regroup once the Host
+  answers. Each checkout keeps the branch it was last read on as its title
+  until Heeler reads it again. (#618)
+- Round the bottom corners of a collapsed By Workspace card with nothing to
+  summarize, such as a Workspace whose Agents are all idle, instead of ending
+  it in a square-cornered strip under its header. (#616)
+- Put Show Chat or Show Agent Terminal and More with Back in iPhone Duo's
+  side controls, using the system overflow menu instead of leaving their
+  capsule over the content. Horizontal layouts keep their existing controls.
+  (#612)
+- Put Back with the system controls along an iPhone Duo's side on Agent Chat,
+  Agent Terminal and Shell Terminal details, instead of leaving it floating at
+  the opposite top corner. (#610)
+- Give the website and bilingual docs clean search URLs, sitemaps, app metadata,
+  browser icons, landscape sharing cards, and permanent canonical redirects.
+  Keep error pages, raw guides, and search data out of search results, and add
+  direct App Store links to both docs home pages. Explain remote Claude Code
+  and Codex use on iPhone and iPad, with setup, Chat, notification, and Usage
+  widget guidance on the existing pages, and identify Heeler as an independent
+  herdr mobile client. (#605)
+- Chat fills in earlier messages page by page and keeps up with the Agent while
+  it does, so returning to a long conversation no longer shows a few old rows
+  under a spinner and a blank screen until a whole turn has loaded. Messages
+  above a compaction show as they load rather than all at once at the end, and
+  one Load Earlier Messages is enough in a long conversation reopened from the
+  device. (#598)
+- An Agent's Changes totals end the line above when the card already shows the
+  directory field beside them, instead of holding a line of their own. (#598)
+- Keep the Host connection row atop the Agents and Terminals lists one
+  height while Hosts connect, so the list below no longer jumps. Statuses
+  stay on one line; those that do not fit fold into a count, and the row's
+  sheet lists every Host. (#594)
+- Keep an Agent's terminal and draft on screen while its connection recovers,
+  with the status and a loading indicator in the title, even when the title is
+  folded. New input waits until the Host is ready, and the keyboard stays up.
+  A stall no longer replaces a connection that still answers, unless a request
+  timed out opening a channel on it, and a send whose reply was lost is never
+  sent twice. Scrolling still queued on the phone after 200 ms is dropped;
+  rows already sent can arrive when the connection comes back. Typing or
+  scrolling through a stall no longer reattaches the terminal when the link
+  returns. A cut connection on a Unix Host now shows Reconnecting… on a Shell
+  instead of flashing Session Ended, and a terminal that is reattaching ignores
+  input until the new session paints. Chat shows a query lost to the link only
+  when the next one is lost too. (#523; PR #595)
+- Bring out the Agents list when swiping in from the left edge of an
+  Agent or Shell Terminal beside a hidden sidebar, such as on an iPhone
+  Duo's inner display or a Pro Max in landscape, instead of closing it to
+  No Agent Selected. The sidebar now follows the finger, on iPad too. (#592)
+- Remove a Saved Chat while its Host is not connected. Closing one always
+  failed with "The Host is not connected"; its row and More menu now offer
+  Remove, which takes it and its saved messages off this device and leaves
+  the Host alone. (#594)
+- Keep each row's fields in Agent List Fields on their own line. The last
+  one, often the add button, could drop below the row onto the next.
+  (#591)
+- Keep the Composer, Direct Input and Shell Terminal input rows on top of
+  the keyboard on an iPhone Duo's inner display, where the Console's tab
+  bar stays below them. A gap the height of the tab bar opened between
+  them. (#534)
+- Keep the paste button on a terminal's keyboard row visible: it could
+  appear as an empty space when the terminal opened. In light mode it is
+  now a plain glyph like the row's other buttons, without a gray backing.
+  (#536)
 - Show a new Claude Code Agent's Chat, such as one started in a new
   worktree, as No Messages Yet until its first message, instead of
   Conversation Not Found. (#530)

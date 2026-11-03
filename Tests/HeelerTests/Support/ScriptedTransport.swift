@@ -37,7 +37,18 @@ final actor ScriptedTransport: Transport {
         return try await chatFiles.home()
     }
 
+    /// Host paths `fileStatus` answers when no Chat files are scripted;
+    /// any other path does not exist.
+    private var scriptedFileStatuses: [String: RemoteFileStatus]?
+    private(set) var fileStatusPaths: [String] = []
+
+    func setFileStatuses(_ statuses: [String: RemoteFileStatus]) {
+        scriptedFileStatuses = statuses
+    }
+
     func fileStatus(atPath path: String) async throws -> RemoteFileStatus? {
+        fileStatusPaths.append(path)
+        if chatFiles == nil, let scriptedFileStatuses { return scriptedFileStatuses[path] }
         guard let chatFiles else { throw TransportError.hostFeatureUnavailable(feature: "Chat") }
         return try await chatFiles.status(path)
     }
@@ -127,6 +138,7 @@ final actor ScriptedTransport: Transport {
     private var eventContinuation: AsyncThrowingStream<HerdrEvent, any Error>.Continuation?
     private var subscriptionObservers: [UUID: AsyncStream<[EventSubscription]>.Continuation] = [:]
     private var nextSubscriptionGate: ScriptedTransportCallGate?
+    private var nextEventEndGate: ScriptedTransportCallGate?
     private var nextAttachID: UInt64 = 0
     private var liveAttachID: UInt64?
     private var nextAttachGate: ScriptedTransportCallGate?
@@ -342,6 +354,10 @@ final actor ScriptedTransport: Transport {
         nextSubscriptionGate = gate
     }
 
+    func gateNextEventEnd(using gate: ScriptedTransportCallGate) {
+        nextEventEndGate = gate
+    }
+
     /// Wait for actual stream installation, not merely a captured request.
     /// AsyncStream cancellation ends the wait if the test is canceled.
     func waitForLiveSubscription(containing expected: [EventSubscription]) async throws {
@@ -448,6 +464,50 @@ final actor ScriptedTransport: Transport {
     /// Makes every subsequent sidebar layout read throw `failure`.
     func setSidebarLayoutReadFailure(_ failure: (any Error)?) {
         sidebarLayoutReadFailure = failure
+    }
+
+    /// The Host's `usage-accounts.json` bytes; nil scripts "no Account added".
+    private(set) var usageAccountFile: Data?
+    /// Every Account file replace received, in order.
+    private(set) var replacedUsageAccountFiles: [Data] = []
+    private(set) var usageAccountFileReads = 0
+    private var usageAccountFileReadFailure: (any Error)?
+    private var usageAccountFileWriteFailure: (any Error)?
+    private var nextUsageAccountFileWriteGate: ScriptedTransportCallGate?
+
+    func setUsageAccountFile(_ data: Data?) {
+        usageAccountFile = data
+    }
+
+    func setUsageAccountFileReadFailure(_ failure: (any Error)?) {
+        usageAccountFileReadFailure = failure
+    }
+
+    /// Makes every subsequent Account file replace throw `failure` without
+    /// landing.
+    func setUsageAccountFileWriteFailure(_ failure: (any Error)?) {
+        usageAccountFileWriteFailure = failure
+    }
+
+    /// Holds the next Account file replace, after it is counted, until
+    /// `gate` opens.
+    func gateNextUsageAccountFileWrite(_ gate: ScriptedTransportCallGate) {
+        nextUsageAccountFileWriteGate = gate
+    }
+
+    func readUsageAccountFile() async throws -> Data? {
+        usageAccountFileReads += 1
+        if let usageAccountFileReadFailure { throw usageAccountFileReadFailure }
+        return usageAccountFile
+    }
+
+    func replaceUsageAccountFile(_ contents: Data) async throws {
+        let gate = nextUsageAccountFileWriteGate
+        nextUsageAccountFileWriteGate = nil
+        if let gate { await gate.waitUntilOpen() }
+        if let usageAccountFileWriteFailure { throw usageAccountFileWriteFailure }
+        usageAccountFile = contents
+        replacedUsageAccountFiles.append(contents)
     }
 
     /// Scripts what every subsequent Heeler plugin read answers.
@@ -953,7 +1013,10 @@ final actor ScriptedTransport: Transport {
 
     /// Explicit `end()` on the stream: finishes it gracefully, exactly like
     /// the real channel closed by its consumer.
-    private func endStream(id: UInt64) {
+    private func endStream(id: UInt64) async {
+        let gate = nextEventEndGate
+        nextEventEndGate = nil
+        await gate?.waitUntilOpen()
         guard liveStreamID == id else { return }
         eventContinuation?.finish()
         eventContinuation = nil

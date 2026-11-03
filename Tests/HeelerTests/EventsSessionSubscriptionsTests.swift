@@ -420,6 +420,41 @@ struct EventsSessionSubscriptionsTests {
         await session.end()
     }
 
+    /// The run loop stops on a failure that leaves the SSH connection up, so a
+    /// terminal stays attached to it. When that terminal then loses the socket,
+    /// nothing remains to redial, and its reattach must fail with the cause
+    /// rather than wait forever behind Reconnecting.
+    @Test func aTerminalLostAfterTheRunLoopStoppedFailsInsteadOfWaiting() async throws {
+        let transport = ScriptedTransport()
+        let failure = TransportError.socketNotFound(path: "/remote/herdr.sock")
+        let session = makeSession(transport: transport)
+        var updates = session.updates.makeAsyncIterator()
+        await session.resume()
+        #expect(await updates.next() == .status(.connecting))
+        #expect(await updates.next() == .status(.connected))
+
+        await transport.failEventStream(failure)
+        #expect(await updates.next() == .status(.failed(failure)))
+        await #expect(throws: TransportError.sshUnreachable(detail: "socket cut")) {
+            try await session.withTerminalTransport { _, _ in
+                throw TransportError.sshUnreachable(detail: "socket cut")
+            }
+        }
+
+        let reattach = Task {
+            try await session.withTerminalTransport { _, _ in
+                Issue.record("a stopped session handed out a terminal Transport")
+            }
+        }
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(5))
+            reattach.cancel()
+        }
+        await #expect(throws: failure) { try await reattach.value }
+        watchdog.cancel()
+        await session.end()
+    }
+
     // MARK: Silent transport replacement
 
     /// A subscription reinstall that finds the connection degraded replaces
@@ -459,6 +494,10 @@ struct EventsSessionSubscriptionsTests {
         // reinstall's transport check must replace it, silently.
         await first.setConnectionAlive(false)
         await session.updateSubscriptions(updated)
+        // Closing the stream does not wait for the run loop to retire its
+        // Transport. Arrive during the replacement dial, not on the dying
+        // link, where a failed request correctly emits a health warning.
+        await connectGate.waitForEntry()
 
         let probe = Task {
             try await session.withTransport { transport in
@@ -470,6 +509,12 @@ struct EventsSessionSubscriptionsTests {
         try await Task.sleep(for: .milliseconds(50))
         await connectGate.open()
         #expect(try await probe.value == "replacement")
+
+        // The deliberate replacement never announced a failure or a new
+        // activation; the fresh `.connected` is its only signal. Wait for
+        // that acknowledgement before inspecting the installed subscriptions.
+        let nextUpdate = await updates.next()
+        #expect(nextUpdate == .status(.connected))
         // A fresh transport sees exactly one `events.subscribe`, with the
         // CURRENT set: the `[initial]` capture belongs to `first`, the
         // transport that was replaced. Same contract as the suspend/resume
@@ -477,10 +522,6 @@ struct EventsSessionSubscriptionsTests {
         // — accumulating `[initial, updated]` is the same-transport
         // resubscribe case, not a fresh dial.
         #expect(await replacement.capturedSubscriptions == [updated])
-
-        // The deliberate replacement never announced a failure or a new
-        // activation; the fresh `.connected` is its only signal.
-        #expect(await updates.next() == .status(.connected))
         #expect(await session.transportGeneration == 1)
 
         await session.end()
@@ -629,7 +670,9 @@ struct EventsSessionSubscriptionsTests {
         }
         #expect(reattach.0 == "replacement")
         #expect(reattach.1 == 1)
+        #expect(await updates.next() == .connectionHealthChanged)
         #expect(await updates.next() == .status(.connected))
+        #expect(!session.isCheckingConnection)
 
         await session.end()
     }
@@ -669,10 +712,10 @@ struct EventsSessionSubscriptionsTests {
         }
         await subscribeGate.waitForEntry()
 
-        await #expect(throws: TransportError.timedOut) {
+        await #expect(throws: TransportError.sshUnreachable(detail: "dead link")) {
             try await session.withTerminalTransport { transport, _ in
                 #expect(try await transport.ping().version == "second")
-                throw TransportError.timedOut
+                throw TransportError.sshUnreachable(detail: "dead link")
             }
         }
         await subscribeGate.open()

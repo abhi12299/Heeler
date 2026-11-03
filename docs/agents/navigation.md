@@ -24,6 +24,12 @@ its contract.
   consumes [AgentRowLayoutStore](../../Sources/Heeler/Console/AgentRowLayoutStore.swift)
   and [AgentRowLayoutResolver](../../Sources/Heeler/Console/AgentRowLayoutResolver.swift).
   Their matching `AgentRow*Tests` suites cover configuration and rendering.
+  `AgentCardLines` in [AgentCardView](../../Sources/Heeler/Console/AgentCardView.swift)
+  places each row's right side; coverage in `AgentCardChangesTotalsTests`
+  ([ChangesBadgeTests](../../Tests/HeelerTests/ChangesBadgeTests.swift)).
+  [AgentKindMark](../../Sources/Heeler/Console/AgentKindMark.swift) maps kinds to
+  `AgentMarks.xcassets`, and its `AgentStatusAvatar` is the Status Ring that
+  leads each `AgentCardView`. Coverage: [AgentKindMarkTests](../../Tests/HeelerTests/AgentKindMarkTests.swift).
 
 ## Connection, input, and terminals
 
@@ -101,7 +107,7 @@ and [OpenCode's session store](../research/opencode-session-store.md) what it wa
 | Grok Build session paths, records and screen | [GrokTranscriptLocator](../../Sources/Heeler/Chat/Source/GrokTranscriptLocator.swift), [GrokTranscriptReducer](../../Sources/Heeler/Chat/Grok/GrokTranscriptReducer.swift) with [GrokToolSummary](../../Sources/Heeler/Chat/Grok/GrokToolSummary.swift) and [GrokFileChanges](../../Sources/Heeler/Chat/Grok/GrokFileChanges.swift); [GrokScreen](../../Sources/Heeler/Chat/Screen/GrokScreen.swift), read by [GrokInputBoxDetector](../../Sources/Heeler/Chat/Screen/GrokInputBoxDetector.swift), [GrokStopGuard](../../Sources/Heeler/Chat/Screen/GrokStopGuard.swift) and [GrokSessionCheck](../../Sources/Heeler/Chat/Screen/GrokSessionCheck.swift); the post-send witness [ChatSendWitness](../../Sources/Heeler/Chat/Conversation/ChatSendWitness.swift) with [GrokPromptHistoryWitness](../../Sources/Heeler/Chat/Grok/GrokPromptHistoryWitness.swift), run by `AgentChatStore.sendConcern` and `checkSendWitnesses`; [GrokSlashCommands](../../Sources/Heeler/Chat/Grok/GrokSlashCommands.swift) | [GrokTranscriptLocatorTests](../../Tests/HeelerTests/GrokTranscriptLocatorTests.swift), [GrokTranscriptReducerTests](../../Tests/HeelerTests/GrokTranscriptReducerTests.swift), [GrokToolActivityTests](../../Tests/HeelerTests/GrokToolActivityTests.swift), [GrokChatTests](../../Tests/HeelerTests/GrokChatTests.swift), [GrokInputBoxDetectorTests](../../Tests/HeelerTests/GrokInputBoxDetectorTests.swift), [GrokStopGuardTests](../../Tests/HeelerTests/GrokStopGuardTests.swift), [GrokSessionCheckTests](../../Tests/HeelerTests/GrokSessionCheckTests.swift), [GrokPromptHistoryWitnessTests](../../Tests/HeelerTests/GrokPromptHistoryWitnessTests.swift), `AgentChatStoreTests`, [format observations](../research/grok-build-transcript-format.md) |
 | OpenCode store, rows, input and cards | [OpenCodeProbe](../../Sources/Heeler/Chat/OpenCode/OpenCodeProbe.swift) (the read-only Host script, its SQL and output), [OpenCodeRecordSource](../../Sources/Heeler/Chat/OpenCode/OpenCodeRecordSource.swift) (following by query), [OpenCodeTranscriptReducer](../../Sources/Heeler/Chat/OpenCode/OpenCodeTranscriptReducer.swift) (rows into entries and turns); [OpenCodeScreenReader](../../Sources/Heeler/Chat/Screen/OpenCodeScreenReader.swift) (input box), [OpenCodeSendRules](../../Sources/Heeler/Chat/OpenCode/OpenCodeSendRules.swift) (path-only drafts), [OpenCodeDialogParser](../../Sources/Heeler/Chat/Blocked/OpenCodeDialogParser.swift) and [OpenCodeDialogPlanner](../../Sources/Heeler/Chat/Blocked/OpenCodeDialogPlanner.swift) (cards), [OpenCodeStopGuard](../../Sources/Heeler/Chat/OpenCode/OpenCodeStopGuard.swift) (Stop's two Escs), [OpenCodeTerminalTitle](../../Sources/Heeler/Chat/OpenCode/OpenCodeTerminalTitle.swift) (the start-screen watch and the check before sends, in `AgentChatStore`) | [OpenCodeProbeTests](../../Tests/HeelerTests/OpenCodeProbeTests.swift), [OpenCodeStoreQueryTests](../../Tests/HeelerTests/OpenCodeStoreQueryTests.swift), [OpenCodeRecordSourceTests](../../Tests/HeelerTests/OpenCodeRecordSourceTests.swift), [OpenCodeTranscriptReducerTests](../../Tests/HeelerTests/OpenCodeTranscriptReducerTests.swift), [OpenCodeInputBoxDetectorTests](../../Tests/HeelerTests/OpenCodeInputBoxDetectorTests.swift), [OpenCodeDialogParserTests](../../Tests/HeelerTests/OpenCodeDialogParserTests.swift), `DialogActionPlannerTests`, `ChatStopPlanTests`, [OpenCodeChatStoreTests](../../Tests/HeelerTests/OpenCodeChatStoreTests.swift), real execs in [HeelerSSHTransportBehaviorE2ETests+OpenCodeStore](../../Tests/HeelerTests/HeelerSSHTransportBehaviorE2ETests+OpenCodeStore.swift); [ADR 0025](../adr/0025-opencode-chat-reads-its-session-store.md), [store observations](../research/opencode-session-store.md) |
 | Timeline, scrolling, tool output | [ChatTimelineController](../../Sources/Heeler/Chat/Timeline/ChatTimelineController.swift), [ChatTimelineLayout](../../Sources/Heeler/Chat/Timeline/ChatTimelineLayout.swift), [ChatRowBuilder](../../Sources/Heeler/Chat/Timeline/ChatRowBuilder.swift), [ChatToolOutputs](../../Sources/Heeler/Chat/Conversation/ChatToolOutputs.swift) | [ChatTimelineControllerTests](../../Tests/HeelerTests/ChatTimelineControllerTests.swift), [ChatTimelineGeometryTests](../../Tests/HeelerTests/ChatTimelineGeometryTests.swift), [ChatFollowLatchTests](../../Tests/HeelerTests/ChatFollowLatchTests.swift), [ChatToolOutputTests](../../Tests/HeelerTests/ChatToolOutputTests.swift) |
-| Image tool previews | [ChatImagePreviewReader](../../Sources/Heeler/Chat/Source/ChatImagePreviewReader.swift), [ChatImagePreviewController](../../Sources/Heeler/Chat/Timeline/ChatImagePreviewController.swift), context menus in `ChatTimelineController`, `AgentChatStore.readImage` | [ChatImagePreviewTests](../../Tests/HeelerTests/ChatImagePreviewTests.swift), `CodexMessageDisplayTests`, `ChatTimelineControllerTests` |
+| Image rows: thumbnails and previews; image paths in messages | Paths from each program's reducer (`ChatToolActivity.imagePath`, resolved by `ChatImagePath` in [ChatImagePreviewReader](../../Sources/Heeler/Chat/Source/ChatImagePreviewReader.swift)); thumbnails read and kept by [ChatImageThumbnails](../../Sources/Heeler/Chat/Conversation/ChatImageThumbnails.swift), one per `AgentChatStore`, drawn by [ChatImageThumbnail](../../Sources/Heeler/Chat/Timeline/ChatImageThumbnail.swift); the sheet is [ChatImagePreviewController](../../Sources/Heeler/Chat/Timeline/ChatImagePreviewController.swift), opened from the thumbnail and the context menu in `ChatTimelineController`. Paths a message names are marked by [ChatImageLink](../../Sources/Heeler/Chat/Timeline/ChatImageLink.swift) in `ChatMarkdown` (and in user bubbles), drawn as links by `ChatMarkdownView.text` where a row puts a `ChatImageOpener` in the environment, and resolved against the Agent's directory or home by `AgentChatStore.readImage` | [ChatImagePreviewTests](../../Tests/HeelerTests/ChatImagePreviewTests.swift) (suites `ChatImageThumbnailsTests`, `ChatImagePreviewReaderTests`, `ChatImageLinkTests`), `ChatMarkdownTests` (marking and link styles), `CodexMessageDisplayTests`, `GrokToolActivityTests`, `PiChatTests`, `OpenCodeTranscriptReducerTests` and `OpenCodeStoreQueryTests` (the read's image name and the session's folder), `ChatTimelineControllerTests`, `ChatTimelineProjectionTests` |
 | Turn folds, tool groups and floating Collapse Steps | [ChatTimelineProjection](../../Sources/Heeler/Chat/Timeline/ChatTimelineProjection.swift) owns turn scopes; [ChatTimelineController](../../Sources/Heeler/Chat/Timeline/ChatTimelineController.swift) selects the reading scope and preserves its anchor, with controls in [ChatTimelineView](../../Sources/Heeler/Chat/Timeline/ChatTimelineView.swift) and headers in [ChatRowView](../../Sources/Heeler/Chat/Timeline/ChatRowView.swift). `ChatTurn` comes from the transcript adapters; Fold Finished Turns, with Chat's font and text size, lives in [AppearanceSettingsView](../../Sources/Heeler/Settings/AppearanceSettingsView.swift) | [ChatTimelineProjectionTests](../../Tests/HeelerTests/ChatTimelineProjectionTests.swift), [ChatTimelineControllerTests](../../Tests/HeelerTests/ChatTimelineControllerTests.swift), [ClaudeTranscriptReducerTests](../../Tests/HeelerTests/ClaudeTranscriptReducerTests.swift), [CodexProbeTranscriptTests](../../Tests/HeelerTests/CodexProbeTranscriptTests.swift) |
 | File changes under tool rows | [ClaudeTranscriptRecord](../../Sources/Heeler/Chat/Claude/ClaudeTranscriptRecord.swift) (`bashEditDiff`, `structuredPatch`), [ClaudeToolSummary](../../Sources/Heeler/Chat/Claude/ClaudeToolSummary.swift) (git-step note), [ChatFileDiffView](../../Sources/Heeler/Chat/Timeline/ChatFileDiffView.swift) | [ChatFileChangesTests](../../Tests/HeelerTests/ChatFileChangesTests.swift), [ChatTimelineControllerTests](../../Tests/HeelerTests/ChatTimelineControllerTests.swift) |
 | Offline entry points and connection prefetch | [ConsoleChatCache](../../Sources/Heeler/Chat/Cache/ConsoleChatCache.swift), [ChatCachedAgent](../../Sources/Heeler/Chat/Cache/ChatCachedAgent.swift), `ConsoleStore.chatDisplayAgents` and `reconcileChatCache`, `AgentChatStore.prefetch` | [ConsoleChatCacheTests](../../Tests/HeelerTests/ConsoleChatCacheTests.swift), `ConsoleStoreTests.connectingCachesChatWithoutOpeningItsDetail`, `AgentChatStoreTests` |
@@ -128,16 +134,38 @@ is [DemoChatSample](../../Sources/Heeler/Demo/DemoChatSample.swift).
   [HostOnboardingView](../../Sources/Heeler/Hosts/HostOnboardingView.swift)
   embeds the short [AgentUsageSection](../../Sources/Heeler/Usage/AgentUsageSection.swift),
   which opens the tab scoped to that Host.
+  `ConsoleStore.setUsageEnabled(_:)` turns all of it off, reads and widgets
+  included, for Settings' switch.
   `ConsoleStore.agentUsageStore(for:)` retains an
   [AgentUsageStore](../../Sources/Heeler/Usage/AgentUsageStore.swift) per Host;
   it owns refresh polling and the device's per-Host Claude limits preference.
+  Claude Code Accounts ([ADR 0030](../adr/0030-usage-counts-the-accounts-the-user-adds.md),
+  the design's [Accounts](../design/agent-usage.md#accounts)) arrive as the
+  report's `accounts` and `accountSuggestions` (`ClaudeAccountsReportTests`)
+  and need plugin 0.8.0 (`HeelerPluginFeature.claudeAccounts`).
+  The store's `addAccount`, `renameAccount`, `removeAccount` and
+  `ignoreSuggestion` edit the Host's `usage-accounts.json`, modeled by
+  [UsageAccountFile](../../Sources/Heeler/Usage/UsageAccountFile.swift),
+  through `Transport.readUsageAccountFile()` and `replaceUsageAccountFile(_:)`,
+  one change at a time behind ConsoleStore's `usageAccountFileGate`
+  (focused tests: `UsageAccountFileTests`, `ClaudeAccountsStoreTests`).
+  The [Claude Code Accounts sheet and the Usage notice](../../Sources/Heeler/Usage/ClaudeAccountsSheet.swift)
+  make those changes; `AgentUsageLimitsCard` in the sheets file gives each
+  Account its Usage Limits card (focused tests: `ClaudeAccountsSheetTests`).
+  Its `readings(for:)` also feeds the chips, Host detail's closest Account
+  and the iPad strip, and `AgentUsageScope.accounts(of:range:)` gives the
+  Programs card its Account rows (focused tests: `ClaudeAccountsUsageTests`).
+  Demo mode's Studio Mac keeps Accounts and suggestions in an in-memory file
+  (`DemoUsageSample`, `DemoUsageTests`).
   The Home and Lock Screen widgets read the App Group snapshot that
   [AgentUsageWidgetPublisher](../../Sources/Heeler/Usage/AgentUsageWidgetPublisher.swift)
   writes from those stores, modeled in
   [UsageWidgetSnapshot](../../Sources/HeelerUsageCore/UsageWidgetSnapshot.swift)
-  (shared with the extension, as are the formats in `AgentUsageStyle`).
+  (shared with the extension, as are the formats in `AgentUsageStyle`);
+  its Usage Limits follow `readings(for:)`, one entry per Claude Code Account.
   [UsageWidgetViews](../../Sources/HeelerWidgets/Usage/UsageWidgetViews.swift)
-  draws every size and is compiled into the app for tests;
+  draws every size, with `UsageLimitsLayout` and `UsageLimitsPick` choosing
+  each size's layout and reading, and is compiled into the app for tests;
   [UsageWidgets](../../Sources/HeelerWidgets/Usage/UsageWidgets.swift) holds
   the timelines and configuration. Stale Hosts are re-read for the widgets
   by `ConsoleStore.refreshStaleWidgetUsage()` in the foreground and by
@@ -150,6 +178,12 @@ is [DemoChatSample](../../Sources/Heeler/Demo/DemoChatSample.swift).
   herdr's environment, [usage-query.js](../../plugin/src/usage-query.js)
   reads snapshots, and [usage-worker.js](../../plugin/src/usage-worker.js)
   coordinates [scanners, limit readers, buckets and pricing](../../plugin/src/usage).
+  There, [accounts.js](../../plugin/src/usage/accounts.js) reads the Account
+  file and gives each Account its state,
+  [account-suggestions.js](../../plugin/src/usage/account-suggestions.js)
+  lists home candidates and merges the suggestions, and
+  [claude-agents.js](../../plugin/src/usage/claude-agents.js) records the
+  `CLAUDE_CONFIG_DIR` of running Claude Code Agents from the activity hook.
   Read the [design](../design/agent-usage.md) and
   [ADR 0028](../adr/0028-plugin-collects-agent-usage-on-the-host.md).
   Focused app coverage: `AgentUsageStoreTests` and `ClaudeUsagePreferenceTests`
@@ -164,7 +198,10 @@ is [DemoChatSample](../../Sources/Heeler/Demo/DemoChatSample.swift).
   the shared [usage-v1 vector](../../plugin/test-vectors/usage-v1.json).
   Price-table maintenance is in the [plugin README](../../plugin/README.md#maintaining-the-price-table).
 - **Remote directory browsing:** [RemoteDirectoryBrowser](../../Sources/Heeler/Console/RemoteDirectoryBrowser.swift)
-  and `ConsoleStore.listRemoteDirectories` reach the app SSH adapter.
+  and `ConsoleStore.listRemoteDirectories` reach the app SSH adapter. The
+  Claude Code Accounts browser comes from `AgentUsageStore.accountDirectoryBrowser()`
+  and lists through `RemoteDirectoryListing.followingLinks`, which keeps
+  symbolic links to directories.
   [RemoteDirectoryBrowserTests](../../Tests/HeelerTests/RemoteDirectoryBrowserTests.swift)
   cover store behavior; the first-presentation native check is in
   [the UI runbook](simulator-ui.md).
@@ -209,7 +246,7 @@ is [DemoChatSample](../../Sources/Heeler/Demo/DemoChatSample.swift).
 | Marketing site | [landing](../../landing), its `package.json` scripts, [landing CI](../../.github/workflows/landing.yml) |
 | Docs site | [docs-site/README.md](../../docs-site/README.md) publishes selected `docs/guides/` (English and `docs/guides/zh/`); `pnpm test`, `pnpm run check`, `pnpm run build`, `pnpm run check:links` in `docs-site/`, [docs site CI](../../.github/workflows/docs-site.yml) |
 | Wire types | [generate-wire-types.py](../../scripts/generate-wire-types.py) consumes the committed [herdr-schema.json](../../scripts/herdr-schema.json); generated output is [Transport/Generated](../../Sources/Heeler/Transport/Generated) |
-| App/package CI | [ci.yml](../../.github/workflows/ci.yml), [run-ci-ios-tests.sh](../../scripts/run-ci-ios-tests.sh), [testing.md](testing.md) |
+| App/package CI | Fast builds: [ci.yml](../../.github/workflows/ci.yml), [ci-package.yml](../../.github/workflows/ci-package.yml); script self-tests: [ci-scripts.yml](../../.github/workflows/ci-scripts.yml). Full daily/manual/release verification: [ci-full.yml](../../.github/workflows/ci-full.yml), [run-ci-ios-tests.sh](../../scripts/run-ci-ios-tests.sh); failed scheduled runs: [ci-full-alert.yml](../../.github/workflows/ci-full-alert.yml). Routing and evidence: [testing.md](testing.md) |
 | Node/codegen CI | [ci-node.yml](../../.github/workflows/ci-node.yml) |
 
 Find a symbol before reading a large file: `rg -n 'symbol' Sources Tests`.

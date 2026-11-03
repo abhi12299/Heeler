@@ -1,29 +1,28 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export const DAY = 86_400_000;
 export const RETENTION = 31 * DAY;
-/** `~/.claude-<name>` directories holding Transcripts: other Claude Code accounts, run with CLAUDE_CONFIG_DIR. */
-function claudeAccountDirectories(home) {
-  try {
-    return readdirSync(home).filter(name => name.startsWith(".claude-") && existsSync(join(home, name, "projects"))).map(name => join(home, name));
-  } catch { return []; }
-}
+/**
+ * The roots this environment names. Claude Code's are the Default Account's:
+ * the directory Claude Code uses, first, with the legacy XDG one folded in.
+ * Added Accounts are not roots, so adding one never moves the cache.
+ */
 export function usageRoots(runtime) {
   const env = runtime.env;
   const home = env.HOME;
   const absolute = value => resolve(home, value);
   return {
-    claude: [...new Set([env.CLAUDE_CONFIG_DIR, join(home, ".claude"), join(env.XDG_CONFIG_HOME || join(home, ".config"), "claude"),
-      ...claudeAccountDirectories(home)].filter(Boolean).map(absolute))].sort(),
+    claude: [...new Set([env.CLAUDE_CONFIG_DIR || join(home, ".claude"), join(env.XDG_CONFIG_HOME || join(home, ".config"), "claude")].map(absolute))],
     codex: [absolute(env.CODEX_HOME || join(home, ".codex"))],
   };
 }
 export function cacheDirectory(runtime) {
   const roots = usageRoots(runtime);
-  const key = createHash("sha256").update(JSON.stringify(roots)).digest("hex").slice(0, 20);
+  // Sorted as 0.7.x hashed them, so a Host whose roots are unchanged keeps its cache.
+  const key = createHash("sha256").update(JSON.stringify({ ...roots, claude: [...roots.claude].sort() })).digest("hex").slice(0, 20);
   return join(runtime.stateDir, "usage", key);
 }
 export function readJSON(path) {

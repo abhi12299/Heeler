@@ -17,6 +17,8 @@ struct ChatTimelineActions {
     /// Shown in an expanded tool row whose output was never read.
     var missingOutputText: String = "Output is available when connected."
     var loadImage: ChatImagePreviewController.Loader = { _ in throw ChatImagePreviewError.unavailable }
+    /// The pictures image rows show; nil without a conversation store.
+    var thumbnails: ChatImageThumbnails?
     /// An open trajectory intersects the reading viewport.
     var collapseAvailabilityChanged: @MainActor (Bool) -> Void = { _ in }
 }
@@ -36,6 +38,11 @@ struct ChatRowActions {
     var retryOutput: @MainActor (ChatRowID) -> Void = { _ in }
     /// How far a pull past the top has gone, for the Load Earlier row.
     var olderPull: ChatOlderPull?
+    /// The pictures image rows show.
+    var thumbnails: ChatImageThumbnails?
+    /// Opens an image row's file in the zoomable sheet, showing the
+    /// thumbnail, when there is one, until the file is read.
+    var previewImage: @MainActor (String, UIImage?) -> Void = { _, _ in }
 }
 
 /// A pull past the timeline's top, as the Load Earlier row shows it.
@@ -114,6 +121,14 @@ final class ChatTimelineController: UIViewController, UICollectionViewDelegate {
     /// window coordinates, and how much of the list it covers.
     private var bottomEdge: CGFloat?
     private var bottomObstruction: CGFloat = 0
+    /// The part of the obstruction that is the keyboard, which moves with
+    /// every frame of its motion, and the chrome's own part, which changes in
+    /// steps.
+    private var keyboardLift: CGFloat = 0
+    private var keyboardIsFalling = false
+    private var chromeObstruction: CGFloat?
+    /// A chrome height still being given up over the keyboard's fall.
+    private var chromeHandover: (excess: CGFloat, lift: CGFloat)?
     /// Set when the list may rest with its end under Collapse Steps; the
     /// next layout pass, which knows the end, moves it clear.
     private var wantsEndClearOfCollapseControl = false
@@ -258,7 +273,14 @@ final class ChatTimelineController: UIViewController, UICollectionViewDelegate {
             toggleFile: { [weak self] id, path in self?.toggleFile(id, path: path) },
             showFile: { [weak self] id, path in self?.showFile(id, path: path) },
             retryOutput: { [weak self] id in self?.retryOutput(id) },
-            olderPull: olderPull)
+            olderPull: olderPull,
+            thumbnails: actions.thumbnails,
+            previewImage: { [weak self] path, thumbnail in self?.previewImage(path, thumbnail: thumbnail) })
+    }
+
+    private func previewImage(_ path: String, thumbnail: UIImage?) {
+        ChatImagePreviewController(path: path, placeholder: thumbnail, loadImage: actions.loadImage)
+            .present(from: self)
     }
 
     // MARK: Updates
@@ -443,10 +465,16 @@ final class ChatTimelineController: UIViewController, UICollectionViewDelegate {
     /// beneath it. Measured against the list's own frame, which can stop
     /// short of the screen's bottom (a raised keyboard, the home indicator)
     /// by a different amount than the chrome's safe area says.
-    func setBottomEdge(_ edge: CGFloat?) {
+    ///
+    /// `keyboardLift` is how much of that is the keyboard raising the chrome.
+    func setBottomEdge(
+        _ edge: CGFloat?, keyboardLift: CGFloat = 0, keyboardIsFalling: Bool = false
+    ) {
         loadViewIfNeeded()
-        guard bottomEdge != edge else { return }
+        guard bottomEdge != edge || self.keyboardLift != keyboardLift else { return }
         bottomEdge = edge
+        self.keyboardLift = keyboardLift
+        self.keyboardIsFalling = keyboardIsFalling
         updateBottomObstruction()
     }
 
@@ -457,11 +485,45 @@ final class ChatTimelineController: UIViewController, UICollectionViewDelegate {
             let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
             height = (max(0, bottom - bottomEdge) * scale).rounded() / scale
         }
+        // The Composer folds as the keyboard falls. Its change of height is
+        // spread over the fall, so the rows have one motion and cannot reverse.
+        let chrome = height - keyboardLift
+        let previousChrome = chromeObstruction ?? chrome
+        let chromeChanged = abs(previousChrome - chrome) > 0.5
+        chromeObstruction = chrome
+        if !keyboardIsFalling || keyboardLift <= 0 {
+            chromeHandover = nil
+        } else if chromeChanged {
+            chromeHandover = (previousChrome - chrome, keyboardLift)
+        }
+        if let chromeHandover {
+            height += (chromeHandover.excess * keyboardLift / chromeHandover.lift)
+        }
         guard bottomObstruction != height else { return }
         bottomObstruction = height
+        guard chromeChanged, chromeHandover == nil, collectionView.window != nil,
+            !collectionView.isTracking
+        else {
+            settleBottomObstruction()
+            return
+        }
+        // The chrome eases to its new height and the rows ease along.
+        UIView.animate(
+            withDuration: 0.25, delay: 0,
+            options: [.allowUserInteraction, UIView.AnimationOptions(rawValue: 7 << 16)]
+        ) { [self] in
+            settleBottomObstruction()
+            collectionView.layoutIfNeeded()
+        }
+    }
+
+    private func settleBottomObstruction() {
         applyBottomInset()
-        // A short list's blank space above its rows follows the room.
-        layout.invalidateLayout()
+        // A short list's blank space above its rows follows the room. A longer
+        // list has none, and this runs on each frame of the keyboard's motion.
+        if collectionView.contentSize.height < collectionView.bounds.height {
+            layout.invalidateLayout()
+        }
         collectionView.setNeedsLayout()
     }
 
@@ -1022,16 +1084,31 @@ final class ChatTimelineController: UIViewController, UICollectionViewDelegate {
         else { return nil }
         let path = row.imagePath
         let loader = actions.loadImage
+        let thumbnail = path.flatMap { actions.thumbnails?.image(of: $0) }
         let preview: UIContextMenuContentPreviewProvider? = path.map { path in
-            { ChatImagePreviewController(path: path, loadImage: loader) }
+            { ChatImagePreviewController(path: path, placeholder: thumbnail, loadImage: loader) }
         }
+        let named = path == nil ? row.messageImagePaths : []
         return UIContextMenuConfiguration(identifier: path as NSString?, previewProvider: preview) { [weak self] _ in
             var items: [UIMenuElement] = []
             if let path {
                 items.append(UIAction(title: "Preview Image", image: UIImage(systemName: "photo")) { [weak self] _ in
-                    guard let self else { return }
-                    ChatImagePreviewController(path: path, loadImage: loader).present(from: self)
+                    self?.previewImage(path, thumbnail: thumbnail)
                 })
+            }
+            // The images a message names, by file name when it names several.
+            let previews = named.map { path in
+                UIAction(
+                    title: named.count == 1 ? "Preview Image" : RemoteHostPath.lastComponent(of: path),
+                    image: UIImage(systemName: "photo")
+                ) { [weak self] _ in
+                    self?.previewImage(path, thumbnail: self?.actions.thumbnails?.image(of: path))
+                }
+            }
+            if previews.count == 1 {
+                items += previews
+            } else if !previews.isEmpty {
+                items.append(UIMenu(title: "Preview Image", image: UIImage(systemName: "photo"), children: previews))
             }
             items += [
                 UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in

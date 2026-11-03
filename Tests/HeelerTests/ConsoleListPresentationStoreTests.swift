@@ -263,13 +263,13 @@ struct ConsoleListPresentationStoreTests {
             let rule = switch placed.rule {
             case .none: ""
             case .full: "—"
-            case .inset: "-"
             }
             return switch placed.row {
             case .header: "\(rule)header"
             case .summary: "\(rule)summary"
             case .checkout(let section): "\(rule)checkout \(section.title)"
             case .agent(let agent, _, let alone): "\(rule)\(alone ? "alone" : "agent") \(agent.agent.paneID)"
+            case .newAgent: "\(rule)newAgent"
             }
         }
     }
@@ -295,14 +295,14 @@ struct ConsoleListPresentationStoreTests {
         #expect(repository.primary.checkout?.repoName == "heeler")
         #expect(repository.agents.count == 4)
         #expect(rowShape(repository) == [
-            "header", "alone p1", "—alone p2", "—checkout nest", "agent p3", "-agent p4",
+            "header", "alone p1", "—alone p2", "—checkout nest", "agent p3", "agent p4",
         ])
         #expect(repository.rows.map(\.isFirst) == [true, false, false, false, false, false])
         #expect(repository.rows.map(\.isLast) == [false, false, false, false, false, true])
         #expect(repository.rows.map(\.followsHeader) == [false, true, false, false, true, false])
         // A Workspace with one Agent is that Agent's card; with several, a header leads.
         #expect(rowShape(cards[1]) == ["alone p5"])
-        #expect(rowShape(cards[2]) == ["header", "agent p6", "-agent p7"])
+        #expect(rowShape(cards[2]) == ["header", "agent p6", "agent p7"])
         #expect(cards.flatMap(\.visibleAgentIDs) == agents.map(\.id))
     }
 
@@ -334,6 +334,30 @@ struct ConsoleListPresentationStoreTests {
         #expect(cards.flatMap(\.visibleAgentIDs) == [agents[3].id])
     }
 
+    @Test func collapsedWorkspaceWithNothingToSummarizeEndsAtItsHeader() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        let host = Host.fixture()
+        var agents = [
+            checkoutAgent(host: host, paneID: "p1", status: .idle, workspaceID: "wA", label: "API", repo: "api"),
+            checkoutAgent(host: host, paneID: "p2", status: .idle, workspaceID: "wA", label: "API", repo: "api"),
+        ]
+        let store = ConsoleListPresentationStore(defaults: defaults)
+        store.toggleWorkspace(sid(host, "wA"))
+        var card = try #require(
+            ConsoleWorkspaceCard.cards(store.workspaceSections(hosts: [host], agents: agents)).first)
+        // An empty summary row would be shorter than the card's corners.
+        #expect(card.isCollapsed)
+        #expect(rowShape(card) == ["header"])
+        #expect(card.rows.map(\.isLast) == [true])
+
+        agents[1] = checkoutAgent(
+            host: host, paneID: "p2", status: .working, workspaceID: "wA", label: "API", repo: "api")
+        card = try #require(
+            ConsoleWorkspaceCard.cards(store.workspaceSections(hosts: [host], agents: agents)).first)
+        #expect(rowShape(card) == ["header", "summary"])
+    }
+
     @Test func searchKeepsTheRepositoryHeaderButNotItsUnmatchedMainCheckout() throws {
         let (defaults, cleanup) = try makeDefaults()
         defer { cleanup() }
@@ -349,26 +373,61 @@ struct ConsoleListPresentationStoreTests {
         #expect(rowShape(try #require(cards.first)) == ["header", "alone p2"])
     }
 
+    @Test func savedStructureKeepsTheRepositoryCardOfAnEntryWhoseWorktreesAreNotListed() throws {
+        let (defaults, cleanup) = try makeDefaults()
+        defer { cleanup() }
+        let host = Host.fixture()
+        // A saved entry reports no checkout; the last snapshot's structure does.
+        let saved = consoleAgent(host: host, paneID: "p1", status: .unknown, workspaceID: "wY", label: "Heeler")
+        let live = checkoutAgent(host: host, paneID: "p9", status: .working, workspaceID: "w1", label: "nest", repo: "heeler", linked: true)
+        let main = checkoutAgent(host: host, paneID: "p1", status: .working, workspaceID: "wY", label: "Heeler", repo: "heeler")
+        let structure = try [main, live].map {
+            ChatCachedWorkspace(id: $0.agent.workspaceID, label: $0.workspaceLabel, checkout: try #require($0.repositoryCheckout))
+        }
+        let store = ConsoleListPresentationStore(defaults: defaults)
+
+        let cards = ConsoleWorkspaceCard.cards(
+            store.workspaceSections(hosts: [host], agents: [saved], savedStructures: [host.id: structure]))
+
+        #expect(cards.map(\.id) == [sid(host, "wY")])
+        let card = try #require(cards.first)
+        #expect(card.isRepository)
+        #expect(card.primary.checkout == main.repositoryCheckout)
+        #expect(rowShape(card) == ["header", "alone p1"])
+        let liveCard = try #require(
+            ConsoleWorkspaceCard.cards(store.workspaceSections(hosts: [host], agents: [main, live])).first)
+        #expect(liveCard.id == card.id)
+        #expect(liveCard.nested.map(\.id) == card.nested.map(\.id))
+        // A search lists only matches and so no worktree without one.
+        let searched = ConsoleWorkspaceCard.cards(store.workspaceSections(
+            hosts: [host], agents: [saved], savedStructures: [host.id: structure], searchQuery: "Heeler"))
+        #expect(searched.map(rowShape) == [["alone p1"]])
+        // Without a structure the entry is a Workspace of its own.
+        let unplaced = ConsoleWorkspaceCard.cards(store.workspaceSections(hosts: [host], agents: [saved]))
+        #expect(unplaced.map(rowShape) == [["alone p1"]])
+        #expect(unplaced.first?.primary.checkout == nil)
+    }
+
     @Test func rowsInACardLeaveTheWorkspaceHostAndCheckoutDirectoryToIt() {
         let host = Host.fixture()
         let atCheckout = checkoutAgent(
             host: host, paneID: "p1", status: .idle, workspaceID: "w1", label: "nest", repo: "heeler", linked: true)
-        #expect(ConsoleWorkspaceCard.hiddenTokens(for: atCheckout, showsHost: false) == [.workspace, .host])
-        #expect(ConsoleWorkspaceCard.hiddenTokens(for: atCheckout, showsHost: true) == [.workspace])
+        #expect(ConsoleWorkspaceCard.hiddenTokens(for: atCheckout, checkoutPath: atCheckout.checkoutPath, showsHost: false) == [.workspace, .host])
+        #expect(ConsoleWorkspaceCard.hiddenTokens(for: atCheckout, checkoutPath: atCheckout.checkoutPath, showsHost: true) == [.workspace])
         let inCheckout = ConsoleAgent(
             hostID: host.id, hostName: host.displayName,
             agent: Agent(
                 terminalID: "term_p2", kind: "claude", title: "Task", status: .idle,
                 workspaceID: "w1", tabID: "w1:t1", paneID: "p2", cwd: "/wt/nest", revision: 1),
             workspaceLabel: "nest", repositoryCheckout: atCheckout.repositoryCheckout)
-        #expect(ConsoleWorkspaceCard.hiddenTokens(for: inCheckout, showsHost: true) == [.workspace, .directory])
+        #expect(ConsoleWorkspaceCard.hiddenTokens(for: inCheckout, checkoutPath: inCheckout.checkoutPath, showsHost: true) == [.workspace, .directory])
 
         let layout = AgentRowLayout(rows: [
             [.init(.workspace), .init(.host)], [.init(.agent)], [.init(.directory)],
         ])
         let card = AgentCardPresentation(
             agent: inCheckout, layout: layout,
-            hiding: ConsoleWorkspaceCard.hiddenTokens(for: inCheckout, showsHost: false))
+            hiding: ConsoleWorkspaceCard.hiddenTokens(for: inCheckout, checkoutPath: inCheckout.checkoutPath, showsHost: false))
         #expect(card.headline == inCheckout.agent.displayName)
         #expect(card.additionalRows.isEmpty)
     }
@@ -643,6 +702,37 @@ struct AgentCardPresentationTests {
         #expect(qualifiers(.consoleDefault) == [nil, nil, nil])
         let workspaceOnly = AgentRowLayout(rows: [[.init(.workspace)], [.init(.directory)]])
         #expect(qualifiers(workspaceOnly) == ["OMP", "Pi", nil])
+    }
+
+    /// A row that leads with its program's mark is named by it, so only
+    /// kinds without a mark get the program after a shared title.
+    @Test func aMarkNamesItsProgramSoOnlyUnmarkedKindsGetQualified() {
+        let agents = [
+            programAgent(pane: "p1", kind: "claude"),
+            programAgent(pane: "p2", kind: "codex"),
+            programAgent(pane: "p3", kind: "omp"),
+        ]
+        let workspaceOnly = AgentRowLayout(rows: [[.init(.workspace)], [.init(.directory)]])
+        func qualifiers(leadsWithMark: Bool) -> [String?] {
+            let found = AgentTitleQualifier.qualifiers(for: agents) { agent in
+                let card = AgentCardPresentation(agent: agent, layout: workspaceOnly, leadsWithMark: leadsWithMark)
+                return .init(
+                    title: card.headline, namesAgent: card.namesAgent(inFirst: card.rows.count))
+            }
+            return agents.map { found[$0.id] }
+        }
+        #expect(qualifiers(leadsWithMark: false) == ["Claude", "Codex", "OMP"])
+        #expect(qualifiers(leadsWithMark: true) == [nil, nil, "OMP"])
+    }
+
+    /// A card that shows every other field elsewhere keeps the kind word as
+    /// configured, not the unstyled fallback name.
+    @Test func aKindWordLeftAloneByTheCardKeepsItsStyle() {
+        let layout = AgentRowLayout(rows: [[.init(.workspace), .init(.agent, dim: true)]])
+        let card = AgentCardPresentation(
+            agent: programAgent(pane: "p1", kind: "claude"), layout: layout, hiding: [.workspace],
+            leadsWithMark: true)
+        #expect(card.rows == [[RenderedToken(token: .agent, text: "claude", fg: nil, bold: nil, dim: true)]])
     }
 
     private func programAgent(pane: String, kind: String, workspace: String = "proj-omp")

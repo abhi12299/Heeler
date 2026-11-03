@@ -12,6 +12,10 @@ protocol Transport: Sendable {
     /// path; Host-local session discovery may run before it.
     func ping() async throws -> ServerInfo
 
+    /// A liveness probe has its own budget, independent of ordinary requests.
+    /// Its soft deadline must not cancel a still-recoverable SSH channel open.
+    func ping(timeout: Duration) async throws -> ServerInfo
+
     /// Lists the local herdr sessions visible to this SSH account. This is a
     /// Host-level capability and does not depend on the currently selected
     /// API socket, so onboarding can recover from a stale manual selection.
@@ -250,6 +254,17 @@ protocol Transport: Sendable {
         timeZone: String, claudeLimits: Bool, pluginRoot: String
     ) async throws -> AgentUsageReport
 
+    /// Reads the Claude Code Account file (`usage-accounts.json`, ADR 0030)
+    /// from this Host's Heeler plugin config dir; nil when no Account was
+    /// ever added. Same plugin gate and POSIX-only reach as the registration
+    /// read.
+    func readUsageAccountFile() async throws -> Data?
+
+    /// Atomically replaces the Account file with `contents` (temp file +
+    /// rename, file 0600 in a 0700 directory), creating it when absent. Same
+    /// plugin gate as the registration write.
+    func replaceUsageAccountFile(_ contents: Data) async throws
+
     /// Runs one change to the Host's Heeler plugin: the herdr CLI for install
     /// and uninstall, the session's `plugin.enable` request for enable.
     /// Throws `HeelerPluginStepError` when herdr refuses or fails the step,
@@ -366,6 +381,10 @@ protocol Transport: Sendable {
 
 extension Transport {
     var routeID: UUID? { nil }
+
+    func ping(timeout: Duration) async throws -> ServerInfo {
+        try await ping()
+    }
 
     /// Test doubles and alternative transports that do not expose Host-level
     /// session discovery can opt out without inventing sessions.
@@ -517,6 +536,14 @@ extension Transport {
         timeZone: String, claudeLimits: Bool, pluginRoot: String
     ) async throws -> AgentUsageReport {
         throw TransportError.hostFeatureUnavailable(feature: "Usage")
+    }
+
+    func readUsageAccountFile() async throws -> Data? {
+        throw NotificationRegistrationError.pluginNotInstalled
+    }
+
+    func replaceUsageAccountFile(_ contents: Data) async throws {
+        throw NotificationRegistrationError.pluginNotInstalled
     }
 
     func runHeelerPluginStep(_ step: HeelerPluginStep) async throws {
@@ -980,6 +1007,9 @@ enum RemoteHostPath {
 struct RemoteDirectoryListing: Sendable, Equatable {
     let directories: [String]
     let truncated: Bool
+    /// The names in `directories` that are symbolic links to a directory.
+    /// Only a listing that follows links has any.
+    var symbolicLinks: Set<String> = []
 }
 
 /// A coding agent process running inside a herdr Pane.

@@ -74,6 +74,8 @@ struct ConsoleWorkspaceCard: Identifiable, Equatable, Sendable {
         case header
         /// A collapsed card's summary under its header: a row of its own,
         /// so a fold adds or removes rows and never resizes the header.
+        /// With nothing to summarize the header ends the card instead, as
+        /// an empty row would be too short for the card's corners.
         case summary
         /// A checkout with several Agents inside a repository's card.
         case checkout(ConsoleWorkspaceSection)
@@ -84,13 +86,12 @@ struct ConsoleWorkspaceCard: Identifiable, Equatable, Sendable {
         case newAgent
     }
 
-    /// The rule a row draws above itself.
+    /// The rule a row draws above itself. Agents of one checkout have none
+    /// between them, as in the other presentations.
     enum Rule: Equatable, Sendable {
         case none
         /// Between checkouts: across the card.
         case full
-        /// Between Agents of one checkout: from their text.
-        case inset
     }
 
     struct Placed: Identifiable, Equatable, Sendable {
@@ -107,9 +108,8 @@ struct ConsoleWorkspaceCard: Identifiable, Equatable, Sendable {
         let rule: Rule
         let isFirst: Bool
         let isLast: Bool
-
-        /// Right under a header, which needs no rule.
-        var followsHeader: Bool { !isFirst && rule == .none }
+        /// Right under a card's or checkout's header.
+        let followsHeader: Bool
     }
 
     let primary: ConsoleWorkspaceSection
@@ -122,18 +122,23 @@ struct ConsoleWorkspaceCard: Identifiable, Equatable, Sendable {
     /// search can keep a main checkout none of whose Agents match.
     var checkouts: [ConsoleWorkspaceSection] { ([primary] + nested).filter { !$0.agents.isEmpty } }
     var agents: [ConsoleAgent] { primary.agents + nested.flatMap(\.agents) }
+    /// Whether a collapsed card has anything to say under its header: who
+    /// needs the user and, for a repository, its checkouts.
+    var hasSummary: Bool {
+        !ConsoleHostAgentStatusCounts(agents: agents).items.isEmpty || (isRepository && !checkouts.isEmpty)
+    }
 
     var rows: [Placed] {
         var items: [(Row, Rule)] = []
         func list(_ section: ConsoleWorkspaceSection) {
-            for (index, agent) in section.agents.enumerated() {
-                items.append((.agent(agent, of: section, standsAlone: false), index == 0 ? .none : .inset))
+            for agent in section.agents {
+                items.append((.agent(agent, of: section, standsAlone: false), .none))
             }
         }
         if isRepository {
             items.append((.header, .none))
             if isCollapsed {
-                items.append((.summary, .none))
+                if hasSummary { items.append((.summary, .none)) }
             } else {
                 for (index, checkout) in checkouts.enumerated() {
                     let rule: Rule = index == 0 ? .none : .full
@@ -150,7 +155,11 @@ struct ConsoleWorkspaceCard: Identifiable, Equatable, Sendable {
             items.append((.agent(primary.agents[0], of: primary, standsAlone: true), .none))
         } else {
             items.append((.header, .none))
-            if isCollapsed { items.append((.summary, .none)) } else { list(primary) }
+            if !isCollapsed {
+                list(primary)
+            } else if hasSummary {
+                items.append((.summary, .none))
+            }
         }
         return items.enumerated().map { index, item in
             let id: Placed.ID =
@@ -161,9 +170,14 @@ struct ConsoleWorkspaceCard: Identifiable, Equatable, Sendable {
                 case .agent(let agent, _, _): .agent(agent.id)
                 case .newAgent: .newAgent(primary.id)
                 }
+            let followsHeader: Bool =
+                switch index > 0 ? items[index - 1].0 : nil {
+                case .header?, .checkout?: true
+                default: false
+                }
             return Placed(
                 id: id, row: item.0, rule: item.1,
-                isFirst: index == 0, isLast: index == items.count - 1)
+                isFirst: index == 0, isLast: index == items.count - 1, followsHeader: followsHeader)
         }
     }
 
@@ -173,8 +187,12 @@ struct ConsoleWorkspaceCard: Identifiable, Equatable, Sendable {
         let placed = rows
         guard !isCollapsed, let last = placed.last else { return placed }
         return placed.dropLast() + [
-            Placed(id: last.id, row: last.row, rule: last.rule, isFirst: last.isFirst, isLast: false),
-            Placed(id: .newAgent(primary.id), row: .newAgent, rule: .full, isFirst: false, isLast: true),
+            Placed(
+                id: last.id, row: last.row, rule: last.rule, isFirst: last.isFirst, isLast: false,
+                followsHeader: last.followsHeader),
+            Placed(
+                id: .newAgent(primary.id), row: .newAgent, rule: .full, isFirst: false, isLast: true,
+                followsHeader: false),
         ]
     }
 
@@ -207,11 +225,14 @@ struct ConsoleWorkspaceCard: Identifiable, Equatable, Sendable {
     }
 
     /// The fields a row in a card leaves to the card: the Workspace, the
-    /// Host where a header names it, and a directory that is the checkout.
-    static func hiddenTokens(for agent: ConsoleAgent, showsHost: Bool) -> Set<AgentRowToken> {
+    /// Host where a header names it, and a directory that is the checkout
+    /// at `checkoutPath`, its section's.
+    static func hiddenTokens(
+        for agent: ConsoleAgent, checkoutPath: String?, showsHost: Bool
+    ) -> Set<AgentRowToken> {
         var hidden: Set<AgentRowToken> = [.workspace]
         if !showsHost { hidden.insert(.host) }
-        if let checkoutPath = agent.checkoutPath, agent.agent.cwd == checkoutPath {
+        if let checkoutPath, agent.agent.cwd == checkoutPath {
             hidden.insert(.directory)
         }
         return hidden
@@ -342,8 +363,13 @@ struct ConsoleHostAgentStatusCount: Identifiable, Equatable {
 final class ConsoleListPresentationStore {
     /// Hosts follow catalog order; Workspaces follow their first Agent in
     /// the supplied priority order. Grouping never re-sorts Agents or pins.
+    /// `savedStructures` holds the Workspace structure of each Host whose
+    /// rows may be saved Chat entries, which report no checkout: its
+    /// Workspaces had Agents at the last snapshot and count as Workspaces
+    /// with Agents, so the cards keep the shape the live Agents gave them.
     func workspaceSections(
         hosts: [Host], agents: [ConsoleAgent],
+        savedStructures: [Host.ID: [ChatCachedWorkspace]] = [:],
         filteredHostID: Host.ID? = nil, searchQuery: String = "",
         transcriptMatches: Set<ConsoleAgent.ID> = []
     ) -> [ConsoleWorkspaceSection] {
@@ -361,16 +387,24 @@ final class ConsoleListPresentationStore {
 
             // Nesting is decided on every Agent of the Host, so a search
             // that matches only a worktree still finds its main checkout.
-            // Workspaces exist here only through their Agents: an agentless
-            // main checkout is not projected and cannot be a parent.
+            // Workspaces exist here only through their Agents, or through
+            // the saved structure, whose Workspaces had Agents at the last
+            // snapshot: a main checkout with neither is not projected and
+            // cannot be a parent.
             let everyAgent = agents.filter { $0.hostID == host.id }
             let allBuckets = Dictionary(grouping: everyAgent, by: \.agent.workspaceID)
+            let saved = savedStructures[host.id] ?? []
+            let savedByID = Dictionary(saved.map { ($0.id, $0) }) { first, _ in first }
             var allOrder: [String] = []
             for agent in everyAgent where !allOrder.contains(agent.agent.workspaceID) {
                 allOrder.append(agent.agent.workspaceID)
             }
+            for workspace in saved where !allOrder.contains(workspace.id) {
+                allOrder.append(workspace.id)
+            }
             func checkout(_ workspaceID: String) -> RepositoryCheckout? {
                 allBuckets[workspaceID]?.compactMap(\.repositoryCheckout).first
+                    ?? savedByID[workspaceID]?.checkout
             }
             func mainCheckouts(_ repoKey: String, in ids: [String]) -> [String] {
                 ids.filter {
@@ -378,24 +412,35 @@ final class ConsoleListPresentationStore {
                     return info?.repoKey == repoKey && info?.isLinkedWorktree == false
                 }
             }
+            func parent(of workspaceID: String) -> String? {
+                guard let info = checkout(workspaceID), info.isLinkedWorktree else { return nil }
+                return mainCheckouts(info.repoKey, in: order).first
+                    ?? mainCheckouts(info.repoKey, in: allOrder).first
+            }
             var parentOf: [String: String] = [:]
             for workspaceID in order {
-                guard let info = checkout(workspaceID), info.isLinkedWorktree else { continue }
-                let parent =
-                    mainCheckouts(info.repoKey, in: order).first
-                    ?? mainCheckouts(info.repoKey, in: allOrder).first
-                if let parent { parentOf[workspaceID] = parent }
+                if let parent = parent(of: workspaceID) { parentOf[workspaceID] = parent }
             }
             var childrenOf: [String: [String]] = [:]
             for workspaceID in order {
                 if let parent = parentOf[workspaceID] { childrenOf[parent, default: []].append(workspaceID) }
             }
+            // A saved worktree none of whose Agents is listed yet still makes
+            // its main checkout's card a repository's. It has no rows; a
+            // search, which lists only matches, leaves it out.
+            if !isSearching {
+                for workspace in saved where buckets[workspace.id] == nil {
+                    guard let parent = parent(of: workspace.id) else { continue }
+                    parentOf[workspace.id] = parent
+                    childrenOf[parent, default: []].append(workspace.id)
+                }
+            }
 
             func members(_ workspaceID: String) -> [ConsoleAgent] { buckets[workspaceID] ?? [] }
             func section(_ workspaceID: String) -> ConsoleWorkspaceSection {
-                let label = (allBuckets[workspaceID] ?? []).compactMap(\.workspaceLabel).first {
-                    !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                }
+                let label = ((allBuckets[workspaceID] ?? []).map(\.workspaceLabel) + [savedByID[workspaceID]?.label])
+                    .compactMap { $0 }
+                    .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                 let id = ConsoleWorkspaceSection.ID(hostID: host.id, workspaceID: workspaceID)
                 let parentID = parentOf[workspaceID].map {
                     ConsoleWorkspaceSection.ID(hostID: host.id, workspaceID: $0)
@@ -407,7 +452,9 @@ final class ConsoleListPresentationStore {
                     parentID: parentID)
                 if let info = checkout(workspaceID) {
                     section.checkout = info
-                    section.pathText = allBuckets[workspaceID]?.first?.displayPath(info.checkoutPath)
+                    // Every Agent of a Host shortens its paths alike.
+                    section.pathText = (allBuckets[workspaceID]?.first ?? everyAgent.first)?
+                        .displayPath(info.checkoutPath)
                 }
                 return section
             }
@@ -518,6 +565,7 @@ final class ConsoleListPresentationStore {
     ) -> [ConsoleWorkspaceSection] {
         workspaceSections(
             hosts: hosts, agents: console.chatDisplayAgents,
+            savedStructures: console.savedWorkspaceStructures,
             filteredHostID: filteredHostID, searchQuery: searchQuery,
             transcriptMatches: transcriptMatches)
     }
