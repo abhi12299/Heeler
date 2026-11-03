@@ -16,6 +16,9 @@ Entries reference the pull request that made the change.
   around each transcript match under its row. A spinner shows while
   transcripts are being searched, in place of "No Results" until they answer.
   Agent Search's panel now waits the same second.
+- Switching an Agent from its terminal to Chat lets go of the terminal at
+  once, so herdr on the desktop gives the pane back its own size; switching
+  back to the terminal attaches again at the phone's size.
 - Agent Search: a translucent tab on the left edge of an Agent's terminal
   and of its Chat opens a list of every running Agent across Workspaces, with a field that
   searches their transcripts and shows the words around each match. Only the

@@ -44,6 +44,50 @@ struct AgentTerminalCacheTests {
         console.setHosts([])
     }
 
+    /// Chat replacing the terminal detaches at once, without the idle
+    /// timeout, so herdr stops sizing the Pane to the phone; showing the
+    /// terminal again attaches afresh.
+    @Test func detachEndsTheAttachNowAndAcquireAttachesAgain() async throws {
+        let (_, transport, console, agent) = try await connectedAgent()
+        let cache = AgentTerminalCache()
+        let owner = UUID()
+        let entry = cache.acquire(agent: agent, console: console, ownerID: owner)
+        entry.attach.viewDidResize(cols: 40, rows: 30)
+        try await waitUntil { await transport.hasLiveAttachSession }
+
+        await cache.detach(entry, ownerID: owner).value
+        #expect(cache.entries.isEmpty)
+        #expect(!entry.isRetained)
+        try await waitUntil { await transport.hasLiveAttachSession == false }
+        #expect(await transport.closedPanes.isEmpty)
+        // A late release from the departing terminal view changes nothing.
+        cache.release(entry, ownerID: owner)
+        #expect(cache.entries.isEmpty)
+
+        let again = cache.acquire(agent: agent, console: console, ownerID: owner)
+        #expect(again !== entry)
+        again.attach.viewDidResize(cols: 40, rows: 30)
+        try await waitUntil { await transport.attachRequests.count == 2 }
+        try await waitUntil { await transport.hasLiveAttachSession }
+        await cache.suspend()
+        console.setHosts([])
+    }
+
+    /// Only the presentation that owns an entry may detach it.
+    @Test func anotherOwnerCannotDetach() async throws {
+        let (_, transport, console, agent) = try await connectedAgent()
+        let cache = AgentTerminalCache()
+        let owner = UUID()
+        let entry = cache.acquire(agent: agent, console: console, ownerID: owner)
+        entry.attach.viewDidResize(cols: 80, rows: 24)
+        try await waitUntil { await transport.hasLiveAttachSession }
+        await cache.detach(entry, ownerID: UUID()).value
+        #expect(cache.entries[agent.id] === entry)
+        #expect(await transport.hasLiveAttachSession)
+        await cache.suspend()
+        console.setHosts([])
+    }
+
     @Test func anotherWindowGetsAFreshSurfaceAndOldReleaseCannotRetireIt() async throws {
         let (_, transport, console, agent) = try await connectedAgent()
         let cache = AgentTerminalCache()

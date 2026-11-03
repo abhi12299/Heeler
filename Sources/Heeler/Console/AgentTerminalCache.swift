@@ -136,6 +136,17 @@ final class AgentTerminalCache {
         }
     }
 
+    /// Detaches now instead of after the idle timeout, for a surface that
+    /// replaces the terminal (Chat): herdr then gives the Pane back the size
+    /// its other clients draw it at. A later `acquire` attaches afresh.
+    @discardableResult
+    func detach(_ entry: Entry, ownerID: UUID) -> Task<Void, Never> {
+        guard entries[entry.agentID] === entry, entry.presentationOwnerID == ownerID else {
+            return teardowns[entry.agentID] ?? Task {}
+        }
+        return evict(entry)
+    }
+
     func removeHost(_ hostID: Host.ID) async {
         let identities = Set(entries.keys).union(teardowns.keys).filter { $0.hostID == hostID }
         for id in identities {

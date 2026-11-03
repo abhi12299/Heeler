@@ -274,6 +274,20 @@ struct AgentDetailView: View {
         }
     }
 
+    /// Chat replaces the terminal, so nothing on this device draws the
+    /// Pane: detach now rather than keep it at the phone's size until the
+    /// idle timeout. Showing the terminal again attaches afresh.
+    private func detachTerminalForChat() {
+        if let retainedAgent {
+            console.agentTerminals.detach(retainedAgent, ownerID: retentionOwnerID)
+            self.retainedAgent = nil
+            attach = makePrivateAttach()
+            attachReference.store = attach
+        } else {
+            attach.leaveForTerminalHandoff()
+        }
+    }
+
     private func prepareRetainedAgent() {
         guard permitsRetention, isOnStage(), showsAgentTerminal else { return }
         if let retainedAgent, retainedAgent.isRetained {
@@ -507,7 +521,10 @@ struct AgentDetailView: View {
             attachReference.showsChat = current == .chat
             sceneRouting?.chatSurfaceDidChange(agent: current == .chat ? agent.id : nil)
             onShowsChat?(current == .chat && shellRoute == nil)
-            if previous != current { applyTerminalAccess() }
+            if previous != current {
+                if current == .chat { detachTerminalForChat() }
+                applyTerminalAccess()
+            }
         }
         // Back from a pushed Shell Terminal: the Agent's surface comes back
         // as it does from Changes. The terminal's chrome is the window's
