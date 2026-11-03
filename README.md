@@ -184,7 +184,9 @@ Notification Service and Widgets extensions and both entitlements. The trade-off
   input notifications itself from the live event stream. They stop if you swipe
   Heeler away or restart the phone (open it again to resume), cost some battery,
   and do not pause or duck other audio;
-- the build expires after **7 days** — run `make free-install` again to renew it;
+- the build expires after **7 days**. `make free-install` only renews it once it
+  has lapsed; `make free-refresh` forces a new 7 days at any time, and
+  `make free-refresh-agent` offers that refresh at login and every 12 hours;
 - a free team may sideload at most **3 apps** per device.
 
 The committed project, entitlements, and Info.plist are untouched; the free

@@ -49,7 +49,9 @@ Entries reference the pull request that made the change.
   the Host's home.
   New Agent also reopens on the Agent you last started on that Host.
 - `make free-install` builds and installs Heeler with a free Apple ID, without
-  push notifications or Live Activities.
+  push notifications or Live Activities. `make free-refresh` renews its 7-day
+  profile early, and `make free-refresh-agent` offers that at login and every
+  12 hours.
 - Paths to images in Chat messages open the image. A path to a picture on the
   Host, written as code, as a link or in the text of your messages or the
   Agent's, shows in the tint color after a photo symbol; tap it, or choose

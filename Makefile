@@ -28,7 +28,7 @@ IOS_WATCH_DEBOUNCE ?= 1s
 DEVICE ?= $(shell python3 scripts/find-ios-device.py iPhone)
 DEVICE_IPAD ?= $(shell python3 scripts/find-ios-device.py iPad)
 
-.PHONY: free-generate free-build free-install help generate resolve build test test-app test-ipad test-ci-app test-ci-package test-ci-evidence test-ci-background-build test-tools test-ci-guards test-ci-watchdog test-ci-recovery check-agent-docs check-test-membership simulator-ui build-device install install-ipad watch-ios-device sim sim-ipad build-sim sim-id archive upload testflight bump publish plugin clean check-device check-device-ipad ssh-artifacts verify-ssh-artifacts
+.PHONY: free-generate free-build free-install free-refresh free-refresh-agent help generate resolve build test test-app test-ipad test-ci-app test-ci-package test-ci-evidence test-ci-background-build test-tools test-ci-guards test-ci-watchdog test-ci-recovery check-agent-docs check-test-membership simulator-ui build-device install install-ipad watch-ios-device sim sim-ipad build-sim sim-id archive upload testflight bump publish plugin clean check-device check-device-ipad ssh-artifacts verify-ssh-artifacts
 
 # Command-line DERIVED overrides remain supported for either platform.
 test-app test-directory-browser-ui sim build-sim sim-id: DERIVED = $(DERIVED_SIMULATOR)
@@ -201,6 +201,14 @@ free-install: free-build ## Build, install, and launch the free-team app on the 
 	xcrun devicectl device process launch --terminate-existing --device $(DEVICE) \
 		$$(cat build/free/bundle-id) \
 		|| echo "Installed, but the launch was refused. Unlock the iPhone; on first install trust the developer in Settings > General > VPN & Device Management."
+
+# Xcode reuses a cached profile until it expires, so a plain free-install
+# never extends the seven days. free-refresh drops the cached profile first.
+free-refresh: ## Force a new 7-day profile for the free-team app and reinstall
+	python3 scripts/free-build/refresh-free-profile.py run
+
+free-refresh-agent: ## Offer a free-team refresh at login and every 12 hours
+	python3 scripts/free-build/refresh-free-profile.py install-agent
 
 watch-ios-device: ## Watch iOS code and install to a connected iPhone/iPad
 	@command -v watchexec >/dev/null || { echo "watchexec not found. Install with: brew install watchexec"; exit 1; }
