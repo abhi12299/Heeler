@@ -1785,6 +1785,9 @@ actor HeelerSSHTransport: Transport {
                 return RemoteDirectoryListing(
                     directories: listing.entries.map(\.name),
                     truncated: listing.truncated)
+            } catch SSHError.sftpFailure(let status) {
+                try? await sftp.close(timeout: .seconds(2))
+                throw TransportError.directoryUnreadable(path: path, status: status)
             } catch {
                 try? await sftp.close(timeout: .seconds(2))
                 throw error

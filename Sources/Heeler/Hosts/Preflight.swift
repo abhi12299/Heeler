@@ -127,6 +127,9 @@ struct PreflightReport: Equatable, Sendable {
         case .invalidDirectoryPath(let path):
             check = .remoteEnvironment
             hint = "That folder path cannot be opened: \(path)."
+        case .directoryUnreadable(let path, _):
+            check = .remoteEnvironment
+            hint = "The Host refused to list \(path)."
         case .streamLocalOpenFailed(let path):
             check = .serverRunning
             if usesHerdrEndpoint {

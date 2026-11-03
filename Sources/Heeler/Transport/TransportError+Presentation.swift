@@ -124,6 +124,17 @@ extension TransportError {
                 summary: "That folder path cannot be opened",
                 detail: path,
                 recoverySuggestion: "Pick a folder from the list instead of typing a path.")
+        case .directoryUnreadable(let path, let status):
+            status == 3
+                ? TransportErrorPresentation(
+                    summary: "The Host won't let Heeler open this folder",
+                    detail: path,
+                    recoverySuggestion: "On a Mac, turn on Allow full disk access for remote users "
+                        + "under System Settings > General > Sharing > Remote Login (i).")
+                : TransportErrorPresentation(
+                    summary: "This folder couldn't be listed",
+                    detail: "\(path) (SFTP status \(status))",
+                    recoverySuggestion: nil)
         case .eventsChannelAlreadyOpen, .terminalChannelAlreadyOpen:
             TransportErrorPresentation(
                 summary: "The connection is busy",

@@ -16,6 +16,9 @@ Entries reference the pull request that made the change.
   around each transcript match under its row. A spinner shows while
   transcripts are being searched, in place of "No Results" until they answer.
   Agent Search's panel now waits the same second.
+- Browse Directories explains a folder the Host refuses to list instead of
+  showing `sftpFailure(status: 3)`. On a Mac it names the setting to turn
+  on: Allow full disk access for remote users, under Sharing > Remote Login.
 - Chat finds the conversation of a Claude Code Agent run with another
   config directory, such as `CLAUDE_CONFIG_DIR=~/.claude-work` (a second
   account), instead of showing Conversation Not Found.

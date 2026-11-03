@@ -186,6 +186,29 @@ struct RemoteDirectoryBrowserTests {
         #expect(fake.calls == ["/home/you", "/home/you/src", "/home/you/src"])
     }
 
+    /// A folder the Host refuses (a Mac's Desktop without full disk access
+    /// for remote logins) says how to allow it, not a raw SFTP status.
+    @Test func aRefusedFolderSaysHowToAllowIt() async throws {
+        let fake = FakeLister()
+        fake.listings = ["/home/you": RemoteDirectoryListing(directories: ["Desktop"], truncated: false)]
+        let browser = makeBrowser(fake)
+        browser.start()
+        try await waitUntil("home loaded") { browser.currentPath == "/home/you" }
+        fake.error = TransportError.directoryUnreadable(path: "/home/you/Desktop", status: 3)
+        browser.enter("Desktop")
+        try await waitUntil("error displayed") { browser.errorMessage != nil }
+        let message = try #require(browser.errorMessage)
+        #expect(message.contains("Allow full disk access for remote users"))
+        #expect(!message.contains("sftpFailure"))
+        #expect(browser.currentPath == "/home/you")
+    }
+
+    @Test func refusedListingsAreNotRetryableAndOtherStatusesNameTheirs() {
+        #expect(TransportError.directoryUnreadable(path: "/x", status: 3).isRetryable == false)
+        let other = TransportError.directoryUnreadable(path: "/x", status: 4).presentation
+        #expect(other.message.contains("SFTP status 4"))
+    }
+
     @Test func truncationFlagTracksEachListing() async throws {
         let fake = FakeLister()
         fake.listings = [

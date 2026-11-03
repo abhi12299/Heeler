@@ -1233,6 +1233,10 @@ indirect enum TransportError: Error, Sendable, Equatable {
     /// the Host's login shell: empty, relative, or holding NUL, quote,
     /// backslash, or control characters. Rejected before any channel opens.
     case invalidDirectoryPath(path: String)
+    /// The Host refused to list a folder over SFTP. Status 3 is permission
+    /// denied: on a Mac, folders such as Desktop, Documents and Downloads
+    /// stay closed to remote logins without full disk access.
+    case directoryUnreadable(path: String, status: UInt64)
     /// A second events channel was requested while one is live; each Host
     /// keeps exactly one dedicated events channel (ADR 0011 headroom).
     case eventsChannelAlreadyOpen
@@ -1299,7 +1303,7 @@ indirect enum TransportError: Error, Sendable, Equatable {
             .protocolVersionMismatch,
             .streamLocalOpenFailed, .gitTimedOut, .hostFileTimedOut, .hostFileUnreadable,
             .hostStoreUnreadable, .hostFeatureUnavailable,
-            .homeDirectoryUnresolvable, .invalidDirectoryPath,
+            .homeDirectoryUnresolvable, .invalidDirectoryPath, .directoryUnreadable,
             .eventsChannelAlreadyOpen,
             .terminalChannelAlreadyOpen, .malformedResponse:
             false
