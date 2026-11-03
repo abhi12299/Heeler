@@ -106,6 +106,9 @@ struct AgentUsagePresentationTests {
 
     @Test func eachHostStateShowsItsCopy() async throws {
         let available = try AgentUsageFixture.report(refreshing: true)
+        // The section groups digits by the process locale, not the view's
+        // environment locale: "8,82,000" under an Indian region.
+        let today = "Today: \(882_000.formatted()) tokens"
         let cases: [(AgentUsageContent, [String])] = [
             (.init(state: .loading), ["Loading Usage…"]),
             (.init(state: .requirement("Usage needs plugin 0.7.0 or newer; this Host has 0.6.2.")),
@@ -120,11 +123,11 @@ struct AgentUsagePresentationTests {
             (.init(state: .available(try AgentUsageFixture.noDataReport())),
              ["Claude Code", "Codex", "No Token Usage recorded on this Host yet."]),
             (.init(state: .available(available)),
-             ["Refreshing", "Today: 882,000 tokens"]),
+             ["Refreshing", today]),
             (.init(state: .available(available), refreshFailure: AgentUsageStore.connectionFailureMessage,
                 isRetryingRefresh: true),
              ["Last refresh failed", AgentUsageStore.connectionFailureMessage,
-              "Showing the last report while Heeler retries.", "Today: 882,000 tokens"]),
+              "Showing the last report while Heeler retries.", today]),
             (.init(state: .available(try AgentUsageFixture.report()),
                 refreshFailure: AgentUsageStore.timeoutMessage),
              ["Last refresh failed", "Showing the last report. Pull to try again."]),

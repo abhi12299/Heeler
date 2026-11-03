@@ -228,9 +228,9 @@ struct AgentNotificationRendererTests {
         let content = AgentNotificationRenderer.content(
             rewriting: Self.relayWrap(envelope: vector.envelope), keys: [record])
 
-        #expect(content.title == "Caterm · Claude")
+        #expect(content.title == "claude needs input")
         #expect(content.subtitle == "")
-        #expect(content.body == "Blocked — waiting for input")
+        #expect(content.body == "Caterm")
         #expect(content.sound == .default)
         #expect(content.userInfo["envelope"] as? String == vector.envelope)
     }
