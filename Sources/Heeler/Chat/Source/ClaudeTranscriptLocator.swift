@@ -62,7 +62,11 @@ enum ClaudeTranscriptUnavailable: Error, Hashable, Sendable {
     case mismatched
 }
 
-/// Finds a Claude Code session transcript under `~/.claude/projects`.
+/// Finds a Claude Code session transcript under `~/.claude/projects`, or
+/// under another config directory's `projects`: an Agent run with
+/// `CLAUDE_CONFIG_DIR=~/.claude-<name>` (a second account) files its
+/// sessions there. `~/.claude` is tried first; the `~/.claude-*` roots are
+/// listed only when it has no file under the Agent's directories.
 ///
 /// Claude files a session under the key of the directory it started in, so
 /// the Agent's current and launch directories are tried first, both
@@ -79,6 +83,8 @@ struct ClaudeTranscriptLocator: Sendable {
     let files: ChatHostFiles
     var statBudget = 200
     var projectListingLimit = 1_000
+    /// At most this many `~/.claude-*` config directories are searched.
+    var accountRootLimit = 20
 
     init(files: ChatHostFiles) {
         self.files = files
@@ -90,16 +96,16 @@ struct ClaudeTranscriptLocator: Sendable {
         sessionID: String, directories: [String], searchesEveryProject: Bool = true
     ) async throws -> Result<ClaudeTranscriptLocation, ClaudeTranscriptUnavailable> {
         let home = try await files.home()
-        let projects = RemoteFilePath.join(home, ".claude", "projects")
+        let defaultRoot = RemoteFilePath.join(home, ".claude")
         let fileName = "\(sessionID).jsonl"
         let plan = Self.plan(directories: directories)
         var tried = Set<String>()
         var stats = 0
         var sawMismatch = false
 
-        func attempt(_ key: String) async throws -> ClaudeTranscriptLocation? {
-            guard tried.insert(key).inserted else { return nil }
-            let directory = RemoteFilePath.join(projects, key)
+        func attempt(_ key: String, in root: String) async throws -> ClaudeTranscriptLocation? {
+            let directory = RemoteFilePath.join(root, "projects", key)
+            guard tried.insert(directory).inserted else { return nil }
             let path = RemoteFilePath.join(directory, fileName)
             stats += 1
             guard let status = try await files.status(path), Self.isUsable(status) else { return nil }
@@ -113,51 +119,83 @@ struct ClaudeTranscriptLocator: Sendable {
             }
         }
 
-        for key in plan.exactKeys {
-            if let found = try await attempt(key) { return .success(found) }
-        }
-        for prefix in plan.longKeyPrefixes {
-            let listing = try await files.list(
-                RemoteFileListingRequest(
-                    directory: projects, kinds: [.directory, .symlink], namePrefix: prefix,
-                    maximumEntries: 100))
-            for entry in listing?.entries ?? [] {
-                if let found = try await attempt(entry.name) { return .success(found) }
+        /// The Agent's directories under one root: their keys, then the
+        /// over-long keys' prefixes.
+        func attemptAgentDirectories(in root: String) async throws -> ClaudeTranscriptLocation? {
+            for key in plan.exactKeys {
+                if let found = try await attempt(key, in: root) { return found }
             }
+            for prefix in plan.longKeyPrefixes {
+                let listing = try await files.list(
+                    RemoteFileListingRequest(
+                        directory: RemoteFilePath.join(root, "projects"), kinds: [.directory, .symlink],
+                        namePrefix: prefix, maximumEntries: 100))
+                for entry in listing?.entries ?? [] {
+                    if let found = try await attempt(entry.name, in: root) { return found }
+                }
+            }
+            return nil
         }
+
+        if let found = try await attemptAgentDirectories(in: defaultRoot) { return .success(found) }
+        let accountRoots = try await accountRoots(home: home)
+        for root in accountRoots {
+            if let found = try await attemptAgentDirectories(in: root) { return .success(found) }
+        }
+        let roots = [defaultRoot] + accountRoots
         guard searchesEveryProject else {
             return .failure(sawMismatch ? .mismatched : .notFound(searchedAll: false))
         }
         func missing(searchedAll: Bool) async throws -> ClaudeTranscriptUnavailable {
             if sawMismatch { return .mismatched }
-            return try await sessionStarted(home: home, sessionID: sessionID)
-                ? .notWritten : .notFound(searchedAll: searchedAll)
-        }
-        guard
-            let listing = try await files.list(
-                RemoteFileListingRequest(
-                    directory: projects, kinds: [.directory, .symlink],
-                    maximumEntries: projectListingLimit, maximumScanned: 20_000))
-        else {
-            return .failure(try await missing(searchedAll: true))
-        }
-        let ordered = Self.byClosestName(listing.entries.map(\.name), to: plan.exactKeys.first ?? "")
-        var searchedAll = !listing.truncated && !listing.scanIncomplete
-        for name in ordered where !tried.contains(name) {
-            guard stats < statBudget else {
-                searchedAll = false
-                break
+            for root in roots where try await sessionStarted(root: root, sessionID: sessionID) {
+                return .notWritten
             }
-            if let found = try await attempt(name) { return .success(found) }
+            return .notFound(searchedAll: searchedAll)
         }
-        return .failure(try await missing(searchedAll: searchedAll))
+        var searchedAll = true
+        var listedAny = false
+        for root in roots {
+            guard
+                let listing = try await files.list(
+                    RemoteFileListingRequest(
+                        directory: RemoteFilePath.join(root, "projects"), kinds: [.directory, .symlink],
+                        maximumEntries: projectListingLimit, maximumScanned: 20_000))
+            else { continue }
+            listedAny = true
+            let ordered = Self.byClosestName(listing.entries.map(\.name), to: plan.exactKeys.first ?? "")
+            if listing.truncated || listing.scanIncomplete { searchedAll = false }
+            for name in ordered where !tried.contains(RemoteFilePath.join(root, "projects", name)) {
+                guard stats < statBudget else {
+                    searchedAll = false
+                    break
+                }
+                if let found = try await attempt(name, in: root) { return .success(found) }
+            }
+        }
+        return .failure(try await missing(searchedAll: listedAny ? searchedAll : true))
     }
 
-    /// Whether Claude Code started the session under `home`: its
+    /// The other Claude Code config directories in the Host's home,
+    /// `~/.claude-<name>`, by name. A Host that won't list its home has none.
+    private func accountRoots(home: String) async throws -> [String] {
+        let listing: RemoteFileListing?
+        do {
+            listing = try await files.list(
+                RemoteFileListingRequest(
+                    directory: home, kinds: [.directory, .symlink], namePrefix: ".claude-",
+                    maximumEntries: accountRootLimit))
+        } catch TransportError.hostFileUnreadable {
+            return []
+        }
+        return (listing?.entries ?? []).map { RemoteFilePath.join(home, $0.name) }
+    }
+
+    /// Whether Claude Code started the session under `root`: its
     /// `session-env/<id>` is a directory. One the Host won't let Heeler
     /// see is no sign either way.
-    private func sessionStarted(home: String, sessionID: String) async throws -> Bool {
-        let path = RemoteFilePath.join(home, ".claude", "session-env", sessionID)
+    private func sessionStarted(root: String, sessionID: String) async throws -> Bool {
+        let path = RemoteFilePath.join(root, "session-env", sessionID)
         do {
             guard let status = try await files.status(path) else { return false }
             return status.kind == nil || status.kind == .directory

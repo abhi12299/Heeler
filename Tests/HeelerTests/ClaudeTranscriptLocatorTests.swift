@@ -66,6 +66,42 @@ struct ClaudeTranscriptLocatorTests {
         #expect(statuses.dropFirst().first == Self.transcriptPath(key: "-private-tmp-heeler-tmp-chat2-zzz"))
     }
 
+    /// An Agent run with `CLAUDE_CONFIG_DIR=~/.claude-<name>` (a second
+    /// account, such as a `cg` alias) files its sessions there.
+    @Test func findsASessionUnderAnotherClaudeConfigDirectory() async throws {
+        let files = VirtualHostFiles()
+        await files.makeDirectory("/home/dev/.claude/projects")
+        await files.makeDirectory("/home/dev/.claude-personal/projects")
+        let key = "-private-tmp-heeler-tmp-chat2-probe-claude"
+        let path = "/home/dev/.claude-gocomply/projects/\(key)/\(Self.sessionID).jsonl"
+        await files.write(try ChatFixture.data("claude/probe2-transcript.jsonl"), at: path)
+
+        let result = try await Self.locate(files)
+
+        #expect(
+            result == .success(
+                ClaudeTranscriptLocation(
+                    projectDirectory: "/home/dev/.claude-gocomply/projects/\(key)",
+                    transcriptPath: path, sessionID: Self.sessionID)))
+        // ~/.claude's exact key first, then each account's, by name.
+        #expect(
+            await files.statuses == [
+                Self.transcriptPath(key: key),
+                "/home/dev/.claude-gocomply/projects/\(key)/\(Self.sessionID).jsonl",
+            ])
+    }
+
+    /// A relocated session in another config directory is still found by
+    /// the full scan.
+    @Test func aRelocatedSessionUnderAnotherConfigDirectoryIsFoundByTheScan() async throws {
+        let files = VirtualHostFiles()
+        await files.makeDirectory("\(Self.projects)/-home-dev-a")
+        let moved = "/home/dev/.claude-work/projects/-var-x/\(Self.sessionID).jsonl"
+        await files.write(try ChatFixture.data("claude/probe2-transcript.jsonl"), at: moved)
+
+        #expect(try await Self.locate(files).get().transcriptPath == moved)
+    }
+
     @Test func emptyFilesAreNotTranscriptsYet() async throws {
         let files = VirtualHostFiles()
         await files.write(Data(), at: Self.transcriptPath(key: "-private-tmp-heeler-tmp-chat2-probe-claude"))
@@ -170,7 +206,8 @@ struct ClaudeTranscriptLocatorTests {
     }
 
     /// A new session's file comes under a directory the Agent reports: while
-    /// waiting for it, Chat stats those alone.
+    /// waiting for it, Chat stats those alone, in `~/.claude` and in each
+    /// `~/.claude-*` config directory (one listing of the home finds those).
     @Test func searchingTheAgentsDirectoriesAloneListsNothing() async throws {
         let files = VirtualHostFiles()
         await files.makeDirectory(Self.sessionEnvironment)
@@ -183,7 +220,7 @@ struct ClaudeTranscriptLocatorTests {
 
         #expect(missing == .failure(.notFound(searchedAll: false)))
         #expect(await files.statuses == [path])
-        #expect(await files.listings.isEmpty)
+        #expect(await files.listings.map(\.namePrefix) == [".claude-"])
 
         await files.write(try ChatFixture.data("claude/probe2-transcript.jsonl"), at: path)
         let found = try await locator.locate(
