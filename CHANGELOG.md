@@ -17,7 +17,7 @@ Entries reference the pull request that made the change.
   transcripts are being searched, in place of "No Results" until they answer.
   Agent Search's panel now waits the same second.
 - Agent Search: a translucent tab on the left edge of an Agent's terminal
-  opens a list of every running Agent across Workspaces, with a field that
+  and of its Chat opens a list of every running Agent across Workspaces, with a field that
   searches their transcripts and shows the words around each match. Only the
   transcripts of Agents running now are searched (Claude Code and Codex
   Agents); tap a

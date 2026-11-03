@@ -366,6 +366,7 @@ struct AgentDetailView: View {
                     openTerminal: { openWorkspaceTerminal() },
                     showChanges: agent.directory == nil ? nil : { changes.open() },
                     workspaceDrawer: workspaceDrawer,
+                    agentSearchDrawer: agentSearchDrawer,
                     selectSurface: { selectSurface($0) })
             } else {
                 AgentTerminalView(

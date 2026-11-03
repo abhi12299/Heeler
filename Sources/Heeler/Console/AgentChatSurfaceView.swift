@@ -30,6 +30,8 @@ struct AgentChatSurfaceView: View {
     private let openTerminal: () -> Void
     private let showChanges: (() -> Void)?
     private let workspaceDrawer: WorkspaceTerminalDrawer?
+    /// Agent Search on the leading edge, as on the Agent's terminal.
+    private let agentSearchDrawer: AgentSearchDrawer?
     /// Swaps the detail back to the Agent terminal.
     private let selectSurface: (AgentDetailSurface) -> Void
 
@@ -115,6 +117,7 @@ struct AgentChatSurfaceView: View {
         openTerminal: @escaping () -> Void,
         showChanges: (() -> Void)?,
         workspaceDrawer: WorkspaceTerminalDrawer?,
+        agentSearchDrawer: AgentSearchDrawer? = nil,
         selectSurface: @escaping (AgentDetailSurface) -> Void
     ) {
         self.agent = agent
@@ -133,6 +136,7 @@ struct AgentChatSurfaceView: View {
         self.openTerminal = openTerminal
         self.showChanges = showChanges
         self.workspaceDrawer = workspaceDrawer
+        self.agentSearchDrawer = agentSearchDrawer
         self.selectSurface = selectSurface
         // Chat lists only the skills its `/` menu sends, in the menu, the
         // Skills sheet and the tools keyboard alike.
@@ -357,6 +361,11 @@ struct AgentChatSurfaceView: View {
                 } else {
                     drawer
                 }
+            }
+        }
+        .overlay {
+            if let agentSearchDrawer {
+                keyboardCarryingSearch(agentSearchDrawer).palette(.system)
             }
         }
         // Above the staging bar, which stays next to the Composer it feeds.
@@ -1030,6 +1039,17 @@ struct AgentChatSurfaceView: View {
         } else {
             keyboardHandoff.cancelShellTerminal()
         }
+    }
+
+    /// A pick from Agent Search keeps the keyboard up on the Agent it opens.
+    private func keyboardCarryingSearch(_ drawer: AgentSearchDrawer) -> AgentSearchDrawer {
+        var carrying = drawer
+        let onSelect = drawer.onSelect
+        carrying.onSelect = { agentID in
+            if agentID != agent.id, keyboardIsUp { keyboardHandoff.arm(for: agentID, mode: .text) }
+            onSelect(agentID)
+        }
+        return carrying
     }
 
     private func keyboardCarryingDrawer(_ drawer: WorkspaceTerminalDrawer) -> WorkspaceTerminalDrawer {
